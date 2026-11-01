@@ -938,10 +938,10 @@ impl Gui {
                             let audio = self.audio_of(&d.name);
                             egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, CARD_LINE)).corner_radius(14).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
+                                let title = |ui: &mut egui::Ui| {
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = 2.0;
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             ui.label(RichText::new(&d.name).size(19.0).family(bold()).color(TEXT));
                                             match (&audio, d.active) {
                                                 (Some(_), true) => chip(ui, "Áudio HDMI", true),
@@ -950,25 +950,36 @@ impl Gui {
                                             }
                                         });
                                         let vendor = model(&d.name).0;
-                                        let sub = [d.gdi.trim_start_matches("\\\\.\\"), d.kind.as_str(), vendor].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+                                        let sub = [d.gdi.trim_start_matches(r"\\.\"), d.kind.as_str(), vendor].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
                                         ui.label(RichText::new(if d.active { sub } else { format!("desligada · {}", d.kind) }).size(12.0).color(MUTED));
                                     });
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let mut on = d.active;
-                                        let last = d.active && active.len() == 1;
-                                        let t = toggle(ui, &mut on, !busy && !last, &d.name);
-                                        let t = if last { t.on_hover_text("Precisa ficar pelo menos uma tela ativa") } else { t.on_hover_text("Liga/desliga esta tela") };
-                                        if t.changed() {
-                                            let mut w = active.clone();
-                                            if on { w.push(d.id.clone()) } else { w.retain(|x| *x != d.id) }
-                                            want = Some(w);
-                                        }
-                                        let so = egui::Button::new(RichText::new("Só esta").size(12.5)).min_size(egui::vec2(0.0, 30.0));
-                                        if ui.add_enabled(!busy, so).on_hover_text("Deixa só esta tela ligada (como o Win+P)").clicked() {
-                                            want = Some(vec![d.id.clone()]);
-                                        }
+                                };
+                                let mut buttons = |ui: &mut egui::Ui| {
+                                    let mut on = d.active;
+                                    let last = d.active && active.len() == 1;
+                                    let t = toggle(ui, &mut on, !busy && !last, &d.name);
+                                    let t = if last { t.on_hover_text("Precisa ficar pelo menos uma tela ativa") } else { t.on_hover_text("Liga/desliga esta tela") };
+                                    if t.changed() {
+                                        let mut w = active.clone();
+                                        if on { w.push(d.id.clone()) } else { w.retain(|x| *x != d.id) }
+                                        want = Some(w);
+                                    }
+                                    let so = egui::Button::new(RichText::new("Só esta").size(12.5)).min_size(egui::vec2(0.0, 30.0));
+                                    if ui.add_enabled(!busy, so).on_hover_text("Deixa só esta tela ligada (como o Win+P)").clicked() {
+                                        want = Some(vec![d.id.clone()]);
+                                    }
+                                };
+                                // narrow card (small window, TV column): buttons get their own row instead of overlapping the name
+                                if ui.available_width() < 380.0 {
+                                    title(ui);
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| buttons(ui));
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        title(ui);
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| buttons(ui));
                                     });
-                                });
+                                }
                                 ui.add_space(4.0);
                                 ui.separator();
                                 // ponytail: matched by name, two identical monitors would share a card
