@@ -9,6 +9,8 @@ Controle de monitores pelo PC, sem o software do fabricante. Windows e Linux, um
 - **Telas tipo Win+P, mas por saída**: liga e desliga cada tela (ex.: deixar a TV no HDMI plugada e desligada), "só esta" ou "todas".
 - **Áudio manual**: ligar/desligar telas nunca troca a saída de áudio; você escolhe a saída (ex.: a TV) na barra de áudio ou no card da tela.
 - **Trava de segurança**: nunca deixa zero telas ativas. Na interface, se a mudança desligar todas as telas que você estava vendo, ela é revertida em 15s, a menos que você clique em "Manter".
+- **Salvar / Desfazer**: toda mudança feita na interface vale na hora, mas só fica gravada ao clicar em **Salvar** (que também manda o comando DDC/CI `0x0C`, "Save Current Settings"). **Desfazer** volta aos valores salvos, e fechar o app sem salvar também desfaz. Se o app cair, as pendências ficam em `pendente-<monitor>.txt` e reaparecem como "não salvas" na próxima abertura.
+- **Iniciar com o sistema**: opção no cabeçalho. Abre minimizado (`--min`). Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; Linux: `~/.config/autostart/monctl.desktop`.
 - **Log** de toda operação e erro, inclusive crash (panic com backtrace e exceção nativa no Windows).
 
 | Monitor | Testado | Caminho |
@@ -34,8 +36,9 @@ monctl audio NOME           define a saída de áudio padrão
 Exemplos:
 
 ```
-monctl off samsung          # desliga a TV (o áudio volta para o anterior)
-monctl on samsung           # liga a TV e manda o áudio para ela
+monctl off samsung          # desliga a TV
+monctl on samsung           # liga a TV (o áudio não muda)
+monctl audio samsung        # manda o áudio para a TV
 monctl only aw              # só o Alienware
 monctl all
 ```
@@ -43,7 +46,7 @@ monctl all
 ## Build
 
 ```
-cargo build --release       # target/release/monctl(.exe)
+cargo build --release       # target/release/monctl(.exe); builds prontos ficam em builds/ (fora do git)
 cargo test
 ```
 

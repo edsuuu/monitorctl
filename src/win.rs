@@ -347,6 +347,11 @@ impl Monitor {
         if unsafe { SetVCPFeature(self.h, code, v as u32) } != 0 { Ok(()) } else { Err(format!("falha ao gravar VCP 0x{code:02X}")) }
     }
 
+    /// DDC/CI "Save Current Settings" (0x0C): commit to the monitor's NVRAM.
+    pub fn save(&self) -> Result<(), String> {
+        if unsafe { SaveCurrentMonitorSettings(self.h) } != 0 { Ok(()) } else { Err("falha no comando salvar (0x0C)".into()) }
+    }
+
     pub fn caps(&self) -> Result<String, String> {
         let mut n = 0;
         if unsafe { GetCapabilitiesStringLength(self.h, &mut n) } == 0 {
@@ -490,4 +495,26 @@ pub fn volume() -> Result<f32, String> {
 
 pub fn set_volume(v: f32) -> Result<(), String> {
     unsafe { endpoint_volume()?.SetMasterVolumeLevelScalar(v.clamp(0.0, 1.0), std::ptr::null()) }.map_err(s)
+}
+
+// ---------- iniciar com o sistema: HKCU\...\Run ----------
+
+const RUN: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
+
+pub fn autostart() -> bool {
+    use windows::Win32::System::Registry::*;
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, w!("monctl"), RRF_RT_REG_SZ, None, None, None) }.is_ok()
+}
+
+/// Points at this exe (opens minimized). ponytail: moving the exe leaves a stale entry; toggle again.
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    use windows::Win32::System::Registry::*;
+    let r = if on {
+        let exe = std::env::current_exe().map_err(s)?;
+        let v: Vec<u16> = format!("\"{}\" --min", exe.display()).encode_utf16().chain([0]).collect();
+        unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, RUN, w!("monctl"), REG_SZ.0, Some(v.as_ptr().cast()), (v.len() * 2) as u32) }
+    } else {
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("monctl")) }
+    };
+    r.ok().map_err(s)
 }

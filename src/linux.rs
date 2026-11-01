@@ -210,6 +210,13 @@ impl Monitor {
         self.raw_set(&[code], v)
     }
 
+    /// DDC/CI "Save Current Settings" (0x0C): commit to the monitor's NVRAM.
+    pub fn save(&self) -> Result<(), String> {
+        self.tx(&[0x0C])?;
+        sleep(Duration::from_millis(200));
+        Ok(())
+    }
+
     pub fn caps(&self) -> Result<String, String> {
         let (mut s, mut off) = (vec![], 0u16);
         loop {
@@ -277,4 +284,24 @@ pub fn volume() -> Result<f32, String> {
 
 pub fn set_volume(v: f32) -> Result<(), String> {
     run("pactl", &["set-sink-volume", "@DEFAULT_SINK@", &format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0)]).map(|_| ())
+}
+
+// ---------- iniciar com o sistema: XDG autostart ----------
+
+fn autostart_file() -> std::path::PathBuf {
+    crate::app_dir().with_file_name("autostart").join("monctl.desktop")
+}
+
+pub fn autostart() -> bool {
+    autostart_file().exists()
+}
+
+pub fn set_autostart(on: bool) -> Result<(), String> {
+    let f = autostart_file();
+    if !on {
+        return fs::remove_file(&f).map_err(|e| e.to_string());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    fs::create_dir_all(f.parent().unwrap_or(&f)).map_err(|e| e.to_string())?;
+    fs::write(&f, format!("[Desktop Entry]\nType=Application\nName=monctl\nExec=\"{}\" --min\nX-GNOME-Autostart-enabled=true\n", exe.display())).map_err(|e| e.to_string())
 }

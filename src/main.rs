@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread::{sleep, spawn};
+use std::thread::{JoinHandle, sleep, spawn};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ---------- logging ----------
@@ -328,8 +328,33 @@ struct Feat {
     op: Op,
     name: String,
     cur: u16,
+    /// last saved value: `cur` differs until the user clicks Salvar (or Desfazer brings it back)
+    saved: u16,
     max: u16,
     values: Vec<(u16, String)>,
+}
+
+/// Unsaved changes survive a crash here: "Op\tsaved" per line, rewritten after every write.
+fn pending_path(name: &str) -> std::path::PathBuf {
+    app_dir().join(format!("pendente-{name}.txt"))
+}
+
+fn write_pending(name: &str, feats: &[Feat]) {
+    let dirty: String = feats.iter().filter(|f| f.cur != f.saved).map(|f| format!("{:?}\t{}\n", f.op, f.saved)).collect();
+    let p = pending_path(name);
+    let r = if dirty.is_empty() { std::fs::remove_file(&p).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) } else { std::fs::write(&p, dirty) };
+    _ = r.map_err(|e| e.to_string()).logged(&format!("{} pendências", p.display()));
+}
+
+/// Baselines left by a previous run that closed without saving: those changes show up as unsaved again.
+fn read_pending(name: &str, feats: &mut [Feat]) {
+    let Ok(t) = std::fs::read_to_string(pending_path(name)) else { return };
+    for (op, v) in t.lines().filter_map(|l| l.split_once('\t')) {
+        if let (Some(f), Ok(v)) = (feats.iter_mut().find(|f| format!("{:?}", f.op) == op), v.parse()) {
+            f.saved = v;
+            log(format!("{name}: {op} não salvo de uma execução anterior (salvo = {v}, atual = {})", f.cur));
+        }
+    }
 }
 
 /// Read every supported feature of a monitor. Ok((features, unmapped capability codes)).
@@ -374,7 +399,7 @@ fn load(m: &sys::Monitor) -> Result<(Vec<Feat>, String), String> {
         }
         let label = |v: u16| names.iter().find(|n| n.0 == v).map_or(format!("0x{v:02X}"), |n| n.1.to_string());
         let values = set.into_iter().map(|v| (v, label(v))).collect();
-        feats.push(Feat { op, name: name.into(), cur, max, values });
+        feats.push(Feat { op, name: name.into(), cur, saved: cur, max, values });
     }
     let unknown = codes
         .unwrap_or_default()
@@ -383,6 +408,7 @@ fn load(m: &sys::Monitor) -> Result<(Vec<Feat>, String), String> {
         .map(|(c, _)| format!("{c:02X}"))
         .collect::<Vec<_>>()
         .join(" ");
+    read_pending(&m.name, &mut feats);
     log(format!("{}: {} controles, sem nome: {unknown}", m.name, feats.len()));
     Ok((feats, unknown))
 }
@@ -510,28 +536,83 @@ type MonState = Result<(Vec<Feat>, String), String>;
 struct Mon {
     name: String,
     state: Arc<Mutex<MonState>>,
-    tx: mpsc::Sender<(Op, u16)>,
+    /// Some((op, value)) = write · None = DDC "Save Current Settings"
+    tx: mpsc::Sender<Option<(Op, u16)>>,
+    worker: JoinHandle<()>,
+}
+
+impl Mon {
+    /// Run `f` on the loaded features (no-op while loading or on error).
+    fn feats<R: Default>(&self, f: impl FnOnce(&mut Vec<Feat>) -> R) -> R {
+        match &mut *self.state.lock().unwrap() {
+            Ok((fs, _)) => f(fs),
+            Err(_) => R::default(),
+        }
+    }
+
+    fn dirty(&self) -> usize {
+        self.feats(|fs| fs.iter().filter(|f| f.cur != f.saved).count())
+    }
+
+    /// Desfazer: write the saved values back.
+    fn discard(&self) {
+        self.feats(|fs| {
+            for f in fs.iter_mut().filter(|f| f.cur != f.saved) {
+                log(format!("{}: desfazer {} {} → {}", self.name, f.name, f.cur, f.saved));
+                f.cur = f.saved;
+                _ = self.tx.send(Some((f.op, f.cur)));
+            }
+        })
+    }
+
+    /// Salvar: current values become the baseline and the monitor commits them.
+    fn save(&self) {
+        self.feats(|fs| fs.iter_mut().for_each(|f| f.saved = f.cur));
+        log(format!("{}: salvar", self.name));
+        _ = self.tx.send(None);
+    }
+
+    /// Window closing: unsaved changes don't persist. Waits until the worker wrote them back.
+    fn close(self) {
+        if self.dirty() > 0 {
+            log(format!("{}: fechando com {} alterações não salvas, desfazendo", self.name, self.dirty()));
+            self.discard();
+        }
+        drop(self.tx);
+        _ = self.worker.join();
+    }
 }
 
 /// One worker per monitor: loads features, then applies writes, coalescing slider drags.
 /// It's also the only thing touching that monitor, which Dell's select-then-read codes require.
 fn spawn_mon(m: sys::Monitor, ctx: egui::Context) -> Mon {
     let state = Arc::new(Mutex::new(Err("carregando…".to_string())));
-    let (tx, rx) = mpsc::channel::<(Op, u16)>();
+    let (tx, rx) = mpsc::channel::<Option<(Op, u16)>>();
     let (st, name) = (state.clone(), m.name.clone());
-    spawn(move || {
+    let worker = spawn(move || {
         *st.lock().unwrap() = load(&m).logged(&format!("{} carregar", m.name));
         ctx.request_repaint();
-        while let Ok((op, v)) = rx.recv() {
-            let mut last = BTreeMap::from([(op, v)]);
-            last.extend(rx.try_iter());
+        while let Ok(first) = rx.recv() {
+            let (mut last, mut save) = (BTreeMap::new(), false);
+            for msg in std::iter::once(first).chain(rx.try_iter()) {
+                match msg {
+                    Some((op, v)) => _ = last.insert(op, v),
+                    None => save = true,
+                }
+            }
             for (op, v) in last {
                 log(format!("{}: {op:?} = {v}", m.name));
                 _ = write(&m, op, v).logged(&format!("{} gravar {op:?}={v}", m.name));
             }
+            if save {
+                _ = m.save().logged(&format!("{} salvar (DDC 0x0C)", m.name));
+            }
+            if let Ok((fs, _)) = &*st.lock().unwrap() {
+                write_pending(&m.name, fs);
+            }
         }
     });
-    Mon { name, state, tx }
+    Mon { name, state, tx, worker }
 }
 
 // Look ported from the Claude Design canvas "monctl UI" (https://claude.ai/artifact/Rf1HUMVeKckdNW75yiJLVQ).
@@ -718,7 +799,7 @@ fn row(ui: &mut egui::Ui, f: &mut Feat, m: &Mon) {
         let lw = (cw * 0.40).clamp(90.0, 160.0);
         ui.allocate_ui_with_layout(egui::vec2(lw, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.set_width(lw);
-            ui.add(egui::Label::new(RichText::new(&f.name).color(SOFT)).truncate());
+            ui.add(egui::Label::new(RichText::new(&f.name).color(if f.cur != f.saved { AMBER } else { SOFT })).truncate());
         });
         help_button(ui, help(&f.name));
         let w = (cw - lw - 22.0 - 3.0 * ui.spacing().item_spacing.x).max(60.0);
@@ -738,7 +819,7 @@ fn row(ui: &mut egui::Ui, f: &mut Feat, m: &Mon) {
             c
         };
         if changed {
-            _ = m.tx.send((f.op, f.cur));
+            _ = m.tx.send(Some((f.op, f.cur)));
         }
     });
 }
@@ -782,6 +863,31 @@ fn controls(ui: &mut egui::Ui, m: &Mon) {
     });
 }
 
+/// Salvar / Desfazer: changes apply live, but only persist once saved.
+fn save_bar(ui: &mut egui::Ui, m: &Mon) {
+    let n = m.dirty();
+    ui.add_space(6.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        let txt = match n {
+            0 => "Tudo salvo".to_string(),
+            1 => "1 alteração não salva".to_string(),
+            n => format!("{n} alterações não salvas"),
+        };
+        ui.label(RichText::new(txt).size(12.5).color(if n == 0 { MUTED } else { AMBER }));
+        help_button(ui, "As mudanças valem na hora, mas só ficam gravadas quando você clica em Salvar.\nDesfazer volta para os valores salvos. Fechar o monctl sem salvar também desfaz.\nEx.: subiu o brilho para testar e não gostou → Desfazer.");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let save = egui::Button::new(RichText::new("Salvar").family(bold()).color(if n > 0 { INK } else { MUTED })).fill(if n > 0 { ACCENT } else { CTRL }).min_size(egui::vec2(84.0, 30.0));
+            if ui.add_enabled(n > 0, save).on_hover_text("Grava as alterações no monitor").clicked() {
+                m.save();
+            }
+            if ui.add_enabled(n > 0, egui::Button::new("Desfazer").min_size(egui::vec2(84.0, 30.0))).on_hover_text("Volta para os valores salvos").clicked() {
+                m.discard();
+            }
+        });
+    });
+}
+
 struct Gui {
     displays: Vec<sys::Display>,
     mons: Vec<Mon>,
@@ -794,6 +900,9 @@ struct Gui {
     audio: Vec<(String, String)>,
     audio_def: String,
     volume: f32,
+    autostart: bool,
+    /// started with --min (autostart): minimize on the first frame
+    start_min: bool,
 }
 
 impl Gui {
@@ -856,6 +965,15 @@ impl Gui {
                     self.reload = true;
                 }
                 egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, CARD_LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+                    let mut on = self.autostart;
+                    let t = toggle(ui, &mut on, true, "Iniciar com o sistema").on_hover_text("Abre o monctl minimizado quando você entra no Windows/Linux");
+                    if t.changed() && sys::set_autostart(on).logged("iniciar com o sistema").is_ok() {
+                        log(format!("iniciar com o sistema: {on}"));
+                        self.autostart = on;
+                    }
+                    ui.label(RichText::new("Iniciar com o sistema").size(12.5).color(MUTED));
+                });
+                egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, CARD_LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
                     ui.horizontal(|ui| self.audio_bar(ui));
                 });
             });
@@ -893,7 +1011,14 @@ impl Gui {
     fn ui(&mut self, ui: &mut egui::Ui) {
         if !self.styled {
             setup_look(ui.ctx());
+            if self.start_min {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
             self.styled = true;
+        }
+        // closing: unsaved monitor changes are written back before the window goes away
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            std::mem::take(&mut self.mons).into_iter().for_each(Mon::close);
         }
         if self.reload && !self.busy.load(Ordering::Relaxed) {
             self.reload(ui.ctx());
@@ -1001,7 +1126,10 @@ impl Gui {
                                         }
                                     }
                                 }
-                                mons.for_each(|m| controls(ui, m));
+                                for m in mons {
+                                    controls(ui, m);
+                                    save_bar(ui, m);
+                                }
                             });
                         });
                     }
@@ -1038,7 +1166,9 @@ fn main() {
     sys::crash_handler();
     let args: Vec<String> = std::env::args().skip(1).collect();
     log(format!("monctl {} ({}) args={args:?}", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
-    if !args.is_empty() {
+    // --min: started by "iniciar com o sistema"
+    let min = args.iter().any(|a| a == "--min");
+    if !args.is_empty() && !min {
         if let Err(e) = cli(&args).logged(&format!("cli {args:?}")) {
             eprintln!("{e}");
             std::process::exit(1);
@@ -1057,6 +1187,8 @@ fn main() {
         audio: vec![],
         audio_def: String::new(),
         volume: 0.0,
+        autostart: sys::autostart(),
+        start_min: min,
     };
     let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1720.0, 900.0]).with_min_inner_size([900.0, 560.0]), ..Default::default() };
     let r = eframe::run_ui_native("monctl", opts, move |ui, _| gui.ui(ui));
@@ -1093,6 +1225,28 @@ mod tests {
         e[72..77].copy_from_slice(&[0, 0, 0, 0xFC, 0]);
         e[77..86].copy_from_slice(b"AW2525HM\n");
         assert_eq!(edid_name(&e).unwrap(), "AW2525HM");
+    }
+
+    #[test]
+    fn pending_roundtrip() {
+        let f = |op, cur, saved| Feat { op, name: String::new(), cur, saved, max: 100, values: vec![] };
+        let name = "teste-pendente";
+        write_pending(name, &[f(Op::Vcp(0x10), 70, 20), f(Op::Aoc(0x51, 0), 3, 3), f(Op::DellQ(0xF4, 0x2F), 1, 2)]);
+        let mut fresh = [f(Op::Vcp(0x10), 70, 70), f(Op::Aoc(0x51, 0), 3, 3), f(Op::DellQ(0xF4, 0x2F), 1, 1)];
+        read_pending(name, &mut fresh);
+        assert_eq!(fresh.iter().map(|f| f.saved).collect::<Vec<_>>(), [20, 3, 2]);
+        write_pending(name, &fresh.map(|x| f(x.op, x.saved, x.saved)));
+        assert!(!pending_path(name).exists(), "nothing unsaved -> file removed");
+    }
+
+    /// Touches the real HKCU\...\Run / ~/.config/autostart: `cargo test -- --ignored autostart`
+    #[test]
+    #[ignore]
+    fn autostart() {
+        sys::set_autostart(true).unwrap();
+        assert!(sys::autostart());
+        sys::set_autostart(false).unwrap();
+        assert!(!sys::autostart());
     }
 
     #[test]
