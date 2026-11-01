@@ -1,3 +1,4 @@
+mod logo;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -23,7 +24,14 @@ fn app_dir() -> PathBuf {
     let base = std::env::var("APPDATA")
         .or_else(|_| std::env::var("XDG_CONFIG_HOME"))
         .unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(base).join("monctl")
+    let folder = PathBuf::from(&base).join("monitorctl");
+    // the app was called monctl: move its folder (log, saved values, caches) over once
+    let old_folder = PathBuf::from(&base).join("monctl");
+    if !folder.exists() && old_folder.exists() {
+        _ = std::fs::rename(&old_folder, &folder);
+        _ = std::fs::rename(folder.join("monitorctl.log"), folder.join("monitorctl.log"));
+    }
+    folder
 }
 
 fn now() -> String {
@@ -40,11 +48,11 @@ fn now() -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}.{:03}Z", s / 3600, s / 60 % 60, s % 60, t.subsec_millis())
 }
 
-/// Append a line to monctl.log (rotated at 1 MB). Never fails.
+/// Append a line to monitorctl.log (rotated at 1 MB). Never fails.
 pub fn log(msg: impl AsRef<str>) {
     static LOCK: Mutex<()> = Mutex::new(());
     let _g = LOCK.lock();
-    let p = app_dir().join("monctl.log");
+    let p = app_dir().join("monitorctl.log");
     _ = std::fs::create_dir_all(app_dir());
     if std::fs::metadata(&p).is_ok_and(|m| m.len() > 1 << 20) {
         _ = std::fs::rename(&p, p.with_extension("log.old"));
@@ -135,7 +143,7 @@ const MCCS: &[Def] = &[
     (Op::Vcp(0xDC), "Modo de imagem", &[(0, "Padrão"), (1, "Produtividade"), (2, "Misto"), (3, "Filme"), (4, "Usuário"), (5, "Jogos"), (6, "Esportes"), (7, "Profissional")]),
 ];
 
-/// AOC G-Menu 3.31 (monctl-rea/aoc-25g3zm.md).
+/// AOC G-Menu 3.31 (monitorctl-rea/aoc-25g3zm.md).
 const AOC: &[Def] = &[
     (Op::Vcp(0x14), "Temperatura de cor", &[(1, "sRGB"), (5, "Warm"), (6, "Normal"), (8, "Cool"), (0x0B, "User"), (0x0E, "AdobeRGB")]),
     (Op::Vcp(0xDC), "Modo de jogo", &[(0, "Desligado"), (0x0B, "FPS"), (0x0C, "RTS"), (0x0D, "Racing"), (0x0E, "Gamer 1"), (0x0F, "Gamer 2"), (0x10, "Gamer 3")]),
@@ -153,18 +161,8 @@ const AOC: &[Def] = &[
     (Op::Aoc(0x08, 0x0008), "DCB", &[(0, "Desligado"), (0x21, "Full Enhance"), (0x22, "Nature Skin"), (0x23, "Sky Blue"), (0x24, "Green Field"), (0x25, "Auto Detect"), (0x26, "Demo")]),
     (Op::Aoc(0x52, 0x0020), "HDR", &[]), // names depend on the reported max, see hdr_names
     (Op::Aoc(0x14, 0), "Clean Vision", &[(0, "Desligado"), (1, "Fraco"), (2, "Médio"), (3, "Forte")]),
-    (Op::Aoc(0x71, 0), "Saturação vermelho", &[]),
-    (Op::Aoc(0x72, 0), "Saturação amarelo", &[]),
-    (Op::Aoc(0x73, 0), "Saturação verde", &[]),
-    (Op::Aoc(0x74, 0), "Saturação ciano", &[]),
-    (Op::Aoc(0x75, 0), "Saturação azul", &[]),
-    (Op::Aoc(0x76, 0), "Saturação magenta", &[]),
-    (Op::Aoc(0x78, 0), "Matiz vermelho", &[]),
-    (Op::Aoc(0x79, 0), "Matiz amarelo", &[]),
-    (Op::Aoc(0x7A, 0), "Matiz verde", &[]),
-    (Op::Aoc(0x7B, 0), "Matiz ciano", &[]),
-    (Op::Aoc(0x7C, 0), "Matiz azul", &[]),
-    (Op::Aoc(0x7D, 0), "Matiz magenta", &[]),
+    // 6-axis saturation/hue (F8 E1 71..7D) exist in G-Menu but the 25G3ZM never answers them (stale
+    // reply, see monitorctl-rea/captures.md); probing them cost ~6 s per start, so they are not listed.
 ];
 
 const fn ed(shift: u8, mask: u16) -> Op {
@@ -175,7 +173,7 @@ const fn ec(shift: u8, mask: u16) -> Op {
 }
 const LEVELS: &[(u16, &str)] = &[(0, "Desligado"), (1, "Baixo"), (2, "Médio"), (3, "Alto")];
 
-/// Alienware Command Center 6.14 (monctl-rea/alienware-aw2525hm.md).
+/// Alienware Command Center 6.14 (monitorctl-rea/alienware-aw2525hm.md).
 const AW: &[Def] = &[
     (Op::Vcp(0x14), "", &[]), // presets are handled by DellPreset
     (Op::Vcp(0xDC), "", &[]),
@@ -328,6 +326,7 @@ pub fn edid_name(e: &[u8]) -> Option<String> {
     Some(format!("{}{}{}{:02X}{:02X}", l(10), l(5), l(0), e[11], e[10]))
 }
 
+#[derive(Clone)]
 struct Feat {
     op: Op,
     name: String,
@@ -362,9 +361,18 @@ fn read_pending(name: &str, feats: &mut [Feat]) {
 }
 
 /// Read every supported feature of a monitor. Ok((features, unmapped capability codes)).
-fn load(m: &sys::Monitor) -> Result<(Vec<Feat>, String), String> {
+/// `progress` gets the list after each feature, so the GUI fills in while the slow DDC reads go on.
+fn load(m: &sys::Monitor, progress: &mut dyn FnMut(&[Feat])) -> Result<(Vec<Feat>, String), String> {
     let k = known(&m.name);
-    let codes = match m.caps().logged(&format!("{} caps", m.name)) {
+    // the capabilities string never changes for a monitor and takes ~3 s to read over DDC/CI: cache it
+    let capabilities_cache = app_dir().join(format!("caps-{}.txt", m.name));
+    let capabilities = match std::fs::read_to_string(&capabilities_cache) {
+        Ok(cached) => Ok(cached),
+        Err(_) => m.caps().inspect(|capabilities| {
+            _ = std::fs::write(&capabilities_cache, capabilities).map_err(|error| error.to_string()).logged("salvar cache de capabilities");
+        }),
+    };
+    let codes = match capabilities.logged(&format!("{} caps", m.name)) {
         Ok(c) => {
             log(format!("{} caps: {c}", m.name));
             Some(parse_vcp(&c))
@@ -404,6 +412,7 @@ fn load(m: &sys::Monitor) -> Result<(Vec<Feat>, String), String> {
         let label = |v: u16| names.iter().find(|n| n.0 == v).map_or(format!("0x{v:02X}"), |n| n.1.to_string());
         let values = set.into_iter().map(|v| (v, label(v))).collect();
         feats.push(Feat { op, name: name.into(), cur, saved: cur, max, values });
+        progress(&feats);
     }
     let unknown = codes
         .unwrap_or_default()
@@ -445,17 +454,17 @@ fn apply_inner(want: &[String]) -> Result<String, String> {
 
 // ---------- CLI ----------
 
-const USAGE: &str = "monctl                         abre a interface
-monctl list                    telas, monitores DDC/CI e saídas de áudio
-monctl on|off|only TELA..      liga/desliga telas (TELA = parte do nome, ex: samsung)
-monctl all                     liga todas as telas conectadas
-monctl caps MONITOR            capabilities DDC/CI + todos os controles e valores
-monctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
-monctl set MONITOR CONTROLE V  V = número ou nome da opção, ex: set aw brilho 30 | set aw preset fps
-monctl sat TELA [0-100]        saturação pela placa de vídeo (NVIDIA), funciona na TV
-monctl audio SAIDA             define a saída de áudio padrão
-monctl mcp                     servidor MCP (stdio) para o Claude controlar tudo isso
-log: %APPDATA%\\monctl\\monctl.log  (Linux: ~/.config/monctl/monctl.log)";
+const USAGE: &str = "monitorctl                         abre a interface
+monitorctl list                    telas, monitores DDC/CI e saídas de áudio
+monitorctl on|off|only TELA..      liga/desliga telas (TELA = parte do nome, ex: samsung)
+monitorctl all                     liga todas as telas conectadas
+monitorctl caps MONITOR            capabilities DDC/CI + todos os controles e valores
+monitorctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
+monitorctl set MONITOR CONTROLE V  V = número ou nome da opção, ex: set aw brilho 30 | set aw preset fps
+monitorctl sat TELA [0-100]        saturação pela placa de vídeo (NVIDIA), funciona na TV
+monitorctl audio SAIDA             define a saída de áudio padrão
+monitorctl mcp                     servidor MCP (stdio) para o Claude controlar tudo isso
+log: %APPDATA%\\monitorctl\\monitorctl.log  (Linux: ~/.config/monitorctl/monitorctl.log)";
 
 /// "10" -> [0x10]; "f8e151" -> [F8, E1, 51]
 fn opcode(s: &str) -> Result<Vec<u8>, String> {
@@ -531,7 +540,7 @@ fn cli(a: &[String]) -> Result<String, String> {
         "caps" => {
             let m = monitor(arg(1)?)?;
             out += &format!("{}\n\n", m.caps().unwrap_or_else(|e| format!("(sem capabilities: {e})")));
-            let (feats, unknown) = load(&m)?;
+            let (feats, unknown) = load(&m, &mut |_| {})?;
             for f in feats {
                 let label = f.values.iter().find(|v| v.0 == f.cur).map_or(String::new(), |v| format!(" ({})", v.1));
                 let opts = f.values.iter().map(|v| v.1.as_str()).collect::<Vec<_>>().join(" | ");
@@ -588,7 +597,7 @@ fn cli(a: &[String]) -> Result<String, String> {
     Ok(out)
 }
 
-// ---------- MCP: `monctl mcp` (stdio, JSON-RPC por linha). Cada ferramenta é um comando da CLI. ----------
+// ---------- MCP: `monitorctl mcp` (stdio, JSON-RPC por linha). Cada ferramenta é um comando da CLI. ----------
 
 fn mcp_tools() -> serde_json::Value {
     use serde_json::json;
@@ -644,7 +653,7 @@ fn mcp() -> Result<(), String> {
             "initialize" => Ok(json!({
                 "protocolVersion": p["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "monctl", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "monitorctl", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": "Controla os monitores e telas deste PC: liga/desliga telas, brilho/contraste/presets via DDC/CI, saturação pela GPU e saída de áudio. Use 'listar' e 'controles' antes de ajustar."
             })),
             "tools/list" => Ok(json!({"tools": mcp_tools()})),
@@ -680,6 +689,8 @@ struct Mon {
     worker: JoinHandle<()>,
     /// the display has a DDC/CI handle (it may still not answer, like a TV)
     hw: bool,
+    /// still reading the monitor: controls shown so far are read-only
+    loading: Arc<AtomicBool>,
 }
 
 impl Mon {
@@ -694,8 +705,8 @@ impl Mon {
     /// Has monitor controls (DDC/CI), not just the GPU ones. While loading: whether it has a DDC handle.
     fn has_ddc(&self) -> bool {
         match &*self.state.lock().unwrap() {
-            Ok((fs, _)) => fs.iter().any(|f| f.op != Op::Vibrance),
-            Err(e) => self.hw && e == "carregando…",
+            Ok((features, _)) => features.iter().any(|feature| feature.op != Op::Vibrance) || (self.hw && self.loading.load(Ordering::Relaxed)),
+            Err(error) => self.hw && error == "carregando…",
         }
     }
 
@@ -757,22 +768,32 @@ fn gpu_feat(name: &str, gdi: &str) -> Option<Feat> {
 fn spawn_mon(m: Option<sys::Monitor>, name: String, gdi: String, ctx: egui::Context) -> Mon {
     let state = Arc::new(Mutex::new(Err("carregando…".to_string())));
     let (tx, rx) = mpsc::channel::<Option<(Op, u16)>>();
-    let (st, n, hw) = (state.clone(), name.clone(), m.is_some());
+    let loading = Arc::new(AtomicBool::new(true));
+    let (st, n, hw, still_loading) = (state.clone(), name.clone(), m.is_some(), loading.clone());
     let worker = spawn(move || {
-        let mut s = match &m {
-            Some(m) => load(m).logged(&format!("{n} carregar")),
+        // GPU saturation is instant: show it first, then each monitor control as soon as it is read
+        let gpu_feature = gpu_feat(&n, &gdi);
+        let publish = |features: Vec<Feat>| {
+            *st.lock().unwrap() = Ok((features, String::new()));
+            ctx.request_repaint();
+        };
+        if let Some(feature) = &gpu_feature {
+            publish(vec![feature.clone()]);
+        }
+        let mut result = match &m {
+            Some(monitor) => load(monitor, &mut |read_so_far| publish(read_so_far.iter().cloned().chain(gpu_feature.clone()).collect())).logged(&format!("{n} carregar")),
             None => Err("sem DDC/CI".into()),
         };
-        if let Some(f) = gpu_feat(&n, &gdi) {
-            match &mut s {
-                Ok((fs, _)) => fs.push(f),
-                Err(_) => s = Ok((vec![f], String::new())),
-            }
+        match (&mut result, gpu_feature) {
+            (Ok((features, _)), Some(feature)) => features.push(feature),
+            (Err(_), Some(feature)) => result = Ok((vec![feature], String::new())),
+            _ => {}
         }
-        if let Ok((fs, _)) = &mut s {
-            read_pending(&n, fs);
+        if let Ok((features, _)) = &mut result {
+            read_pending(&n, features);
         }
-        *st.lock().unwrap() = s;
+        *st.lock().unwrap() = result;
+        still_loading.store(false, Ordering::Relaxed);
         ctx.request_repaint();
         while let Ok(first) = rx.recv() {
             let (mut last, mut save) = (BTreeMap::new(), false);
@@ -803,7 +824,7 @@ fn spawn_mon(m: Option<sys::Monitor>, name: String, gdi: String, ctx: egui::Cont
             write_pending(&n, fs);
         }
     });
-    Mon { name, state, tx, worker, hw }
+    Mon { name, state, tx, worker, hw, loading }
 }
 
 // Look ported from the Claude Design canvas "monctl UI" (https://claude.ai/artifact/Rf1HUMVeKckdNW75yiJLVQ).
@@ -1056,8 +1077,30 @@ fn controls(ui: &mut egui::Ui, m: &Mon) {
     });
 }
 
+/// Round "reload" button with a painted ↻ arrow (font glyphs render blurry/inconsistent).
+fn reload_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(38.0, 38.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Recarregar"));
+    let hovered = response.hovered();
+    let painter = ui.painter();
+    painter.rect(rect, 10.0, if hovered { CTRL } else { CARD }, Stroke::new(1.0, if hovered { CTRL_LINE } else { CARD_LINE }), egui::StrokeKind::Inside);
+    let (center, radius, arrow_color) = (rect.center(), 7.5, if hovered { ACCENT } else { SOFT });
+    let point_at = |angle: f32| center + radius * egui::vec2(angle.cos(), angle.sin());
+    // clockwise arc with a gap on the right; the arrowhead points into the gap
+    let (start, end) = (40f32.to_radians(), 320f32.to_radians());
+    let arc: Vec<egui::Pos2> = (0..=32).map(|step| point_at(start + (end - start) * step as f32 / 32.0)).collect();
+    painter.add(egui::Shape::line(arc, Stroke::new(2.0, arrow_color)));
+    let (tip_base, along, outward) = (point_at(end), egui::vec2(-end.sin(), end.cos()), egui::vec2(end.cos(), end.sin()));
+    let arrowhead = vec![tip_base + along * 4.5, tip_base + outward * 4.0 - along * 1.0, tip_base - outward * 4.0 - along * 1.0];
+    painter.add(egui::Shape::convex_polygon(arrowhead, arrow_color, Stroke::NONE));
+    response
+}
+
 /// Salvar / Desfazer: changes apply live, but only persist once saved.
 fn save_bar(ui: &mut egui::Ui, m: &Mon) {
+    if m.loading.load(Ordering::Relaxed) || m.state.lock().unwrap().is_err() {
+        return; // still loading: nothing to save yet
+    }
     let n = m.dirty();
     ui.add_space(6.0);
     ui.separator();
@@ -1068,7 +1111,7 @@ fn save_bar(ui: &mut egui::Ui, m: &Mon) {
             n => format!("{n} alterações não salvas"),
         };
         ui.label(RichText::new(txt).size(12.5).color(if n == 0 { MUTED } else { AMBER }));
-        help_button(ui, "As mudanças valem na hora, mas só ficam gravadas quando você clica em Salvar.\nDesfazer volta para os valores salvos. Fechar o monctl sem salvar também desfaz.\nEx.: subiu o brilho para testar e não gostou → Desfazer.");
+        help_button(ui, "As mudanças valem na hora, mas só ficam gravadas quando você clica em Salvar.\nDesfazer volta para os valores salvos. Fechar o monitorctl sem salvar também desfaz.\nEx.: subiu o brilho para testar e não gostou → Desfazer.");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let save = egui::Button::new(RichText::new("Salvar").family(bold()).color(if n > 0 { INK } else { MUTED })).fill(if n > 0 { ACCENT } else { CTRL }).min_size(egui::vec2(84.0, 30.0));
             if ui.add_enabled(n > 0, save).on_hover_text("Grava as alterações no monitor").clicked() {
@@ -1096,6 +1139,8 @@ struct Gui {
     autostart: bool,
     /// started with --min (autostart): minimize on the first frame
     start_min: bool,
+    /// header logo texture, made once
+    logo: Option<egui::TextureHandle>,
 }
 
 impl Gui {
@@ -1148,33 +1193,37 @@ impl Gui {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // monitor glyph
-            let (r, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
-            let p = ui.painter();
-            p.rect_stroke(egui::Rect::from_min_size(r.min + egui::vec2(1.0, 3.0), egui::vec2(22.0, 14.0)), 2.0, Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
-            p.line_segment([r.min + egui::vec2(8.0, 21.0), r.min + egui::vec2(16.0, 21.0)], Stroke::new(2.0, ACCENT));
-            p.line_segment([r.min + egui::vec2(12.0, 17.0), r.min + egui::vec2(12.0, 21.0)], Stroke::new(2.0, ACCENT));
+            let logo = self.logo.get_or_insert_with(|| {
+                let image = egui::ColorImage::from_rgba_unmultiplied([64, 64], &logo::pixels(64));
+                ui.ctx().load_texture("logo", image, egui::TextureOptions::LINEAR)
+            });
+            ui.add(egui::Image::new(egui::load::SizedTexture::new(logo.id(), [34.0, 34.0])));
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("monctl").size(17.0).family(bold()).color(TEXT));
-                let ddc = self.displays.iter().filter(|d| self.has_ddc(&d.name)).count();
+                ui.label(RichText::new("monitorctl").size(17.0).family(bold()).color(TEXT));
+                let with_ddc = self.displays.iter().filter(|display| self.has_ddc(&display.name)).count();
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{} telas · {ddc} com DDC/CI", self.displays.len())).size(12.0).color(MUTED));
-                    let st = self.status.lock().unwrap().clone();
-                    if !st.is_empty() {
-                        let c = if self.busy.load(Ordering::Relaxed) { AMBER } else if st.starts_with("erro") { egui::Color32::from_rgb(0xF0, 0x6A, 0x6A) } else { ACCENT };
-                        ui.label(RichText::new(format!("· {st}")).size(12.0).color(c));
+                    ui.label(RichText::new(format!("{} telas · {with_ddc} com DDC/CI", self.displays.len())).size(12.0).color(MUTED));
+                    let status = self.status.lock().unwrap().clone();
+                    if !status.is_empty() {
+                        let status_color = if self.busy.load(Ordering::Relaxed) {
+                            AMBER
+                        } else if status.starts_with("erro") {
+                            egui::Color32::from_rgb(0xF0, 0x6A, 0x6A)
+                        } else {
+                            ACCENT
+                        };
+                        ui.label(RichText::new(format!("· {status}")).size(12.0).color(status_color));
                     }
                 });
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let reload = egui::Button::new(RichText::new("⟳").size(18.0)).min_size(egui::vec2(38.0, 38.0)).corner_radius(10).fill(CARD);
-                if ui.add(reload).on_hover_text("Recarregar telas, monitores e áudio").clicked() {
+                if reload_button(ui).on_hover_text("Recarregar telas, monitores e áudio").clicked() {
                     self.reload = true;
                 }
                 egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0, CARD_LINE)).corner_radius(10).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
                     let mut on = self.autostart;
-                    let t = toggle(ui, &mut on, true, "Iniciar com o sistema").on_hover_text("Abre o monctl minimizado quando você entra no Windows/Linux");
+                    let t = toggle(ui, &mut on, true, "Iniciar com o sistema").on_hover_text("Abre o monitorctl minimizado quando você entra no Windows/Linux");
                     if t.changed() && sys::set_autostart(on).logged("iniciar com o sistema").is_ok() {
                         log(format!("iniciar com o sistema: {on}"));
                         self.autostart = on;
@@ -1327,7 +1376,15 @@ impl Gui {
                                     ui.label(RichText::new(format!("TVs normalmente não aceitam DDC/CI pelo cabo.{gpu}")).color(MUTED));
                                 }
                                 for m in mons {
-                                    controls(ui, m);
+                                    let loading = m.loading.load(Ordering::Relaxed);
+                                    ui.add_enabled_ui(!loading, |ui| controls(ui, m));
+                                    if loading {
+                                        ui.add_space(6.0);
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::Spinner::new().size(14.0).color(MUTED));
+                                            ui.label(RichText::new("lendo o monitor…").size(12.5).color(MUTED));
+                                        });
+                                    }
                                     save_bar(ui, m);
                                 }
                                 if let (Some((id, n)), true) = (&audio, d.active) {
@@ -1369,11 +1426,11 @@ impl Gui {
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         log(format!("PANIC {info}\n{}", std::backtrace::Backtrace::force_capture()));
-        eprintln!("monctl: {info} (detalhes em {})", app_dir().join("monctl.log").display());
+        eprintln!("monitorctl: {info} (detalhes em {})", app_dir().join("monitorctl.log").display());
     }));
     sys::crash_handler();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    log(format!("monctl {} ({}) args={args:?}", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
+    log(format!("monitorctl {} ({}) args={args:?}", env!("CARGO_PKG_VERSION"), std::env::consts::OS));
     // --min: started by "iniciar com o sistema"
     let min = args.iter().any(|a| a == "--min");
     if !args.is_empty() && !min {
@@ -1401,9 +1458,10 @@ fn main() {
         volume: 0.0,
         autostart: sys::autostart(),
         start_min: min,
+        logo: None,
     };
-    let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1720.0, 900.0]).with_min_inner_size([900.0, 560.0]), ..Default::default() };
-    let r = eframe::run_ui_native("monctl", opts, move |ui, _| gui.ui(ui));
+    let opts = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1720.0, 900.0]).with_min_inner_size([900.0, 560.0]).with_title("monitorctl").with_icon(egui::IconData { rgba: logo::pixels(128), width: 128, height: 128 }), ..Default::default() };
+    let r = eframe::run_ui_native("monitorctl", opts, move |ui, _| gui.ui(ui));
     if let Err(e) = r {
         log(format!("ERRO interface: {e}"));
     }

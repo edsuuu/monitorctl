@@ -226,7 +226,7 @@ impl Drop for Monitor {
 
 type QueryInterface = unsafe extern "C" fn(u32) -> *const c_void;
 
-/// nvapi_QueryInterface(id) as a typed fn pointer. IDs from AOC G-Menu's DDCHelperLib (monctl-rea).
+/// nvapi_QueryInterface(id) as a typed fn pointer. IDs from AOC G-Menu's DDCHelperLib (monitorctl-rea).
 fn nvapi<F: Copy>(id: u32) -> Result<F, String> {
     static QI: OnceLock<Result<usize, String>> = OnceLock::new();
     let qi = QI
@@ -503,7 +503,7 @@ const RUN: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 
 pub fn autostart() -> bool {
     use windows::Win32::System::Registry::*;
-    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, w!("monctl"), RRF_RT_REG_SZ, None, None, None) }.is_ok()
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN, w!("monitorctl"), RRF_RT_REG_SZ, None, None, None) }.is_ok()
 }
 
 /// Points at this exe (opens minimized). ponytail: moving the exe leaves a stale entry; toggle again.
@@ -512,9 +512,9 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     let r = if on {
         let exe = std::env::current_exe().map_err(s)?;
         let v: Vec<u16> = format!("\"{}\" --min", exe.display()).encode_utf16().chain([0]).collect();
-        unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, RUN, w!("monctl"), REG_SZ.0, Some(v.as_ptr().cast()), (v.len() * 2) as u32) }
+        unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, RUN, w!("monitorctl"), REG_SZ.0, Some(v.as_ptr().cast()), (v.len() * 2) as u32) }
     } else {
-        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("monctl")) }
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, w!("monitorctl")) }
     };
     r.ok().map_err(s)
 }

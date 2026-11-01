@@ -1,5 +1,5 @@
 [package]
-name = "monctl"
+name = "monitorctl"
 version = "0.1.0"
 edition = "2024"
 description = "Control monitors (DDC/CI brightness, contrast, color...) and toggle display outputs + audio"
@@ -19,3 +19,6 @@ libc = "0.2.191"
 [profile.release]
 debug = "line-tables-only" # file:line in crash backtraces
 lto = true
+
+[build-dependencies]
+embed-resource = "3.0.12"

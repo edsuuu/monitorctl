@@ -289,7 +289,7 @@ pub fn set_volume(v: f32) -> Result<(), String> {
 // ---------- iniciar com o sistema: XDG autostart ----------
 
 fn autostart_file() -> std::path::PathBuf {
-    crate::app_dir().with_file_name("autostart").join("monctl.desktop")
+    crate::app_dir().with_file_name("autostart").join("monitorctl.desktop")
 }
 
 pub fn autostart() -> bool {
@@ -303,7 +303,7 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     fs::create_dir_all(f.parent().unwrap_or(&f)).map_err(|e| e.to_string())?;
-    fs::write(&f, format!("[Desktop Entry]\nType=Application\nName=monctl\nExec=\"{}\" --min\nX-GNOME-Autostart-enabled=true\n", exe.display())).map_err(|e| e.to_string())
+    fs::write(&f, format!("[Desktop Entry]\nType=Application\nName=monitorctl\nExec=\"{}\" --min\nX-GNOME-Autostart-enabled=true\n", exe.display())).map_err(|e| e.to_string())
 }
 
 // ---------- NVIDIA Digital Vibrance (driver proprietário no X11): saturação aplicada pela GPU ----------
