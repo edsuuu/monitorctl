@@ -1,0 +1,20 @@
+[package]
+name = "monctl"
+version = "0.1.0"
+edition = "2024"
+description = "Control monitors (DDC/CI brightness, contrast, color...) and toggle display outputs + audio"
+license = "MIT"
+
+[dependencies]
+eframe = "0.37.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Devices_Display", "Win32_Graphics_Gdi", "Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Console", "Win32_System_Variant", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
+windows-core = "0.62"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.191"
+
+[profile.release]
+debug = "line-tables-only" # file:line in crash backtraces
+lto = true
