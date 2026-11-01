@@ -518,3 +518,51 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     };
     r.ok().map_err(s)
 }
+
+// ---------- NVIDIA Digital Vibrance: saturação aplicada pela GPU no sinal (vale para TV sem DDC/CI) ----------
+// Fora do SDK público; IDs e struct do NvAPIWrapper (FunctionId.cs / PrivateDisplayDVCInfoEx).
+
+#[repr(C)]
+#[derive(Default, Debug)]
+struct DvcInfoEx {
+    version: u32,
+    cur: i32,
+    min: i32,
+    max: i32,
+    def: i32,
+}
+
+type NvDisp = *mut c_void;
+
+fn dvc(gdi: &str) -> Result<(NvDisp, DvcInfoEx), String> {
+    let assoc: unsafe extern "C" fn(*const u8, *mut NvDisp) -> i32 = nvapi(0x35C29134)?;
+    let get: unsafe extern "C" fn(NvDisp, u32, *mut DvcInfoEx) -> i32 = nvapi(0x0E45002D)?;
+    let name = format!("{gdi}\0");
+    let mut h = std::ptr::null_mut();
+    let r = unsafe { assoc(name.as_ptr(), &mut h) };
+    if r != 0 {
+        return Err(format!("{gdi} não é uma saída NVIDIA (NvAPI_GetAssociatedNvidiaDisplayHandle = {r})"));
+    }
+    let mut i = DvcInfoEx { version: size_of::<DvcInfoEx>() as u32 | 1 << 16, ..Default::default() };
+    match unsafe { get(h, 0, &mut i) } {
+        0 => Ok((h, i)),
+        r => Err(format!("NvAPI_GetDVCInfoEx({gdi}) = {r}")),
+    }
+}
+
+/// Saturation of an output, 0..=100 (driver default = 50), by GDI name.
+pub fn vibrance(gdi: &str) -> Result<u16, String> {
+    let (_, i) = dvc(gdi)?;
+    log(format!("{gdi} Digital Vibrance: {i:?}"));
+    Ok(((i.cur - i.min) as f32 * 100.0 / (i.max - i.min).max(1) as f32).round() as u16)
+}
+
+pub fn set_vibrance(gdi: &str, pct: u16) -> Result<(), String> {
+    let set: unsafe extern "C" fn(NvDisp, u32, *mut DvcInfoEx) -> i32 = nvapi(0x4A82C2B1)?;
+    let (h, mut i) = dvc(gdi)?;
+    i.cur = i.min + ((i.max - i.min) as f32 * pct.min(100) as f32 / 100.0).round() as i32;
+    match unsafe { set(h, 0, &mut i) } {
+        0 => Ok(()),
+        r => Err(format!("NvAPI_SetDVCLevelEx({gdi}) = {r}")),
+    }
+}

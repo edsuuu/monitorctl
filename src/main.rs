@@ -104,6 +104,8 @@ enum Op {
     DellPreset,
     /// AlienVision on/off + slot (0xEC).
     DellVision,
+    /// Not DDC: NVIDIA Digital Vibrance, applied by the GPU to the output signal (works on the TV too).
+    Vibrance,
 }
 
 /// (op, label, named values). Empty values = slider. Empty label = hide this code.
@@ -227,7 +229,7 @@ fn gate(op: Op) -> Option<u8> {
         Op::Vcp(c) | Op::DellQ(c, _) | Op::DellBits { code: c, .. } => Some(c),
         Op::DellPreset => Some(0xE2),
         Op::DellVision => Some(0xEC),
-        Op::Aoc(..) => None,
+        Op::Aoc(..) | Op::Vibrance => None,
     }
 }
 
@@ -249,6 +251,7 @@ fn read(m: &sys::Monitor, op: Op) -> Result<(u16, u16), String> {
         }
         Op::DellPreset => m.get(0xE2).map(|(v, x)| (v & 0xFF, x)),
         Op::DellVision => m.get(0xEC).map(|(v, _)| (if v & 0xC000 == 0xC000 { (v & 0x3000) >> 12 } else { 0 }, 3)),
+        Op::Vibrance => Err("saturação da GPU não é DDC/CI".into()),
     }
 }
 
@@ -272,6 +275,7 @@ fn write(m: &sys::Monitor, op: Op, v: u16) -> Result<(), String> {
             m.set(0xEC, 0x8000 | (cur & 0x3000))
         }
         Op::DellVision => m.set(0xEC, 0xC000 | (v & 3) << 12),
+        Op::Vibrance => Err("saturação da GPU não é DDC/CI".into()),
     }
 }
 
@@ -408,7 +412,6 @@ fn load(m: &sys::Monitor) -> Result<(Vec<Feat>, String), String> {
         .map(|(c, _)| format!("{c:02X}"))
         .collect::<Vec<_>>()
         .join(" ");
-    read_pending(&m.name, &mut feats);
     log(format!("{}: {} controles, sem nome: {unknown}", m.name, feats.len()));
     Ok((feats, unknown))
 }
@@ -442,14 +445,16 @@ fn apply_inner(want: &[String]) -> Result<String, String> {
 
 // ---------- CLI ----------
 
-const USAGE: &str = "monctl                      abre a interface
-monctl list                 telas, monitores DDC/CI e saídas de áudio
-monctl on|off|only NOME..   liga/desliga telas (NOME = parte do nome, ex: samsung)
-monctl all                  liga todas as telas conectadas
-monctl caps NOME            capabilities DDC/CI + todos os controles e valores
-monctl get NOME CODIGO      ex: monctl get aw 10   |  AOC: monctl get aoc f8e151
-monctl set NOME CODIGO VAL  ex: monctl set 25g3 10 70
-monctl audio NOME           define a saída de áudio padrão
+const USAGE: &str = "monctl                         abre a interface
+monctl list                    telas, monitores DDC/CI e saídas de áudio
+monctl on|off|only TELA..      liga/desliga telas (TELA = parte do nome, ex: samsung)
+monctl all                     liga todas as telas conectadas
+monctl caps MONITOR            capabilities DDC/CI + todos os controles e valores
+monctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
+monctl set MONITOR CONTROLE V  V = número ou nome da opção, ex: set aw brilho 30 | set aw preset fps
+monctl sat TELA [0-100]        saturação pela placa de vídeo (NVIDIA), funciona na TV
+monctl audio SAIDA             define a saída de áudio padrão
+monctl mcp                     servidor MCP (stdio) para o Claude controlar tudo isso
 log: %APPDATA%\\monctl\\monctl.log  (Linux: ~/.config/monctl/monctl.log)";
 
 /// "10" -> [0x10]; "f8e151" -> [F8, E1, 51]
@@ -464,19 +469,47 @@ fn monitor(q: &str) -> Result<sys::Monitor, String> {
     sys::monitors().into_iter().find(|m| m.name.to_lowercase().contains(&q)).ok_or(format!("monitor '{q}' não encontrado"))
 }
 
-fn cli(a: &[String]) -> Result<(), String> {
+fn display(q: &str) -> Result<sys::Display, String> {
+    let q = q.to_lowercase();
+    sys::displays()?.into_iter().find(|d| d.name.to_lowercase().contains(&q) || d.id == q).ok_or(format!("tela '{q}' não encontrada"))
+}
+
+/// A named control of this monitor ("brilho", "preset"): exact name first, then partial.
+fn control(m: &sys::Monitor, q: &str) -> Option<Def> {
+    let (q, k) = (q.to_lowercase(), known(&m.name));
+    let exact = k.iter().find(|d| d.1.to_lowercase() == q);
+    exact.or_else(|| k.iter().find(|d| !d.1.is_empty() && d.1.to_lowercase().contains(&q))).copied()
+}
+
+/// "30" or an option name ("fps", "desligado").
+fn value(d: &Def, v: &str) -> Result<u16, String> {
+    let q = v.to_lowercase();
+    let named = || d.2.iter().find(|o| o.1.to_lowercase() == q).or_else(|| d.2.iter().find(|o| o.1.to_lowercase().contains(&q))).map(|o| o.0);
+    v.parse().ok().or_else(named).ok_or_else(|| {
+        let opts: Vec<&str> = d.2.iter().map(|o| o.1).collect();
+        format!("valor '{v}' inválido para {}; opções: {}", d.1, opts.join(", "))
+    })
+}
+
+fn label(d: &Def, v: u16) -> String {
+    d.2.iter().find(|o| o.0 == v).map_or(String::new(), |o| format!(" ({})", o.1))
+}
+
+/// Runs a command, returning what it would print.
+fn cli(a: &[String]) -> Result<String, String> {
     let arg = |i: usize| a.get(i).map(String::as_str).ok_or(USAGE.to_string());
+    let mut out = String::new();
     match a[0].as_str() {
         "list" => {
             for d in sys::displays()? {
-                println!("{} {:<12} {:<14} {}", if d.active { "●" } else { "○" }, d.name, d.gdi, d.id);
+                out += &format!("{} {:<12} {:<14} {:<12} {}\n", if d.active { "●" } else { "○" }, d.name, d.gdi, d.kind, d.id);
             }
             for m in sys::monitors() {
-                println!("ddc: {}", m.name);
+                out += &format!("ddc: {}\n", m.name);
             }
             let def = sys::default_audio().logged("áudio padrão").unwrap_or_default();
             for (id, n) in sys::audio_outputs()? {
-                println!("áudio: {} {n}", if id == def { "*" } else { " " });
+                out += &format!("áudio: {} {n}\n", if id == def { "*" } else { " " });
             }
         }
         "on" | "off" | "only" | "all" => {
@@ -493,28 +526,53 @@ fn cli(a: &[String]) -> Result<(), String> {
                 "only" => want = pick,
                 _ => want = ds.iter().map(|d| d.id.clone()).collect(),
             }
-            println!("{}", apply(&want)?);
+            out += &apply(&want)?;
         }
         "caps" => {
             let m = monitor(arg(1)?)?;
-            println!("{}\n", m.caps().unwrap_or_else(|e| format!("(sem capabilities: {e})")));
+            out += &format!("{}\n\n", m.caps().unwrap_or_else(|e| format!("(sem capabilities: {e})")));
             let (feats, unknown) = load(&m)?;
             for f in feats {
                 let label = f.values.iter().find(|v| v.0 == f.cur).map_or(String::new(), |v| format!(" ({})", v.1));
-                println!("{:<26} {:>5}{label:<22} max {:<5} {:?}", f.name, f.cur, f.max, f.op);
+                let opts = f.values.iter().map(|v| v.1.as_str()).collect::<Vec<_>>().join(" | ");
+                out += &format!("{:<26} {:>5}{label:<22} max {:<5} {opts}\n", f.name, f.cur, f.max);
             }
-            println!("\ncódigos sem nome: {unknown}");
+            out += &format!("\ncódigos sem nome: {unknown}");
         }
         "get" => {
-            let (m, op) = (monitor(arg(1)?)?, opcode(arg(2)?)?);
-            let (c, x) = if op.len() == 1 { m.get(op[0]) } else { m.raw_get(&op) }?;
-            println!("{c} (0x{c:04X}) / max {x}");
+            let m = monitor(arg(1)?)?;
+            if let Some(d) = control(&m, arg(2)?) {
+                let (c, x) = read(&m, d.0)?;
+                out += &format!("{} = {c}{} / max {x}", d.1, label(&d, c));
+            } else {
+                let op = opcode(arg(2)?)?;
+                let (c, x) = if op.len() == 1 { m.get(op[0]) } else { m.raw_get(&op) }?;
+                out += &format!("{c} (0x{c:04X}) / max {x}");
+            }
         }
         "set" => {
-            let (m, op) = (monitor(arg(1)?)?, opcode(arg(2)?)?);
-            let v: u16 = arg(3)?.parse().map_err(|_| "valor inválido")?;
-            log(format!("cli set {} {op:02X?} = {v}", m.name));
-            if op.len() == 1 { m.set(op[0], v) } else { m.raw_set(&op, v) }?;
+            let m = monitor(arg(1)?)?;
+            if let Some(d) = control(&m, arg(2)?) {
+                let v = value(&d, arg(3)?)?;
+                log(format!("cli set {} {} = {v}", m.name, d.1));
+                write(&m, d.0, v)?;
+                out += &format!("{} {} = {v}{}", m.name, d.1, label(&d, v));
+            } else {
+                let op = opcode(arg(2)?)?;
+                let v: u16 = arg(3)?.parse().map_err(|_| "valor inválido")?;
+                log(format!("cli set {} {op:02X?} = {v}", m.name));
+                if op.len() == 1 { m.set(op[0], v) } else { m.raw_set(&op, v) }?;
+                out += &format!("{} {op:02X?} = {v}", m.name);
+            }
+        }
+        "sat" => {
+            let d = display(arg(1)?)?;
+            if let Some(v) = a.get(2) {
+                let v: u16 = v.parse().ok().filter(|v| *v <= 100).ok_or("saturação vai de 0 a 100 (50 = padrão)")?;
+                log(format!("cli saturação GPU {} = {v}", d.name));
+                sys::set_vibrance(&d.gdi, v)?;
+            }
+            out += &format!("{} saturação (GPU) = {}", d.name, sys::vibrance(&d.gdi)?);
         }
         "audio" => {
             let q = arg(1)?.to_lowercase();
@@ -522,10 +580,91 @@ fn cli(a: &[String]) -> Result<(), String> {
             let (id, n) = outs.iter().find(|o| o.1.to_lowercase().contains(&q)).ok_or(format!("áudio '{q}' não encontrado"))?;
             sys::set_default_audio(id)?;
             log(format!("áudio → {n}"));
-            println!("áudio → {n}");
+            out += &format!("áudio → {n}");
         }
+        "mcp" => mcp()?,
         _ => return Err(USAGE.into()),
     }
+    Ok(out)
+}
+
+// ---------- MCP: `monctl mcp` (stdio, JSON-RPC por linha). Cada ferramenta é um comando da CLI. ----------
+
+fn mcp_tools() -> serde_json::Value {
+    use serde_json::json;
+    let s = |d: &str| json!({"type": "string", "description": d});
+    let obj = |props: serde_json::Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
+    json!([
+        {"name": "listar", "description": "Lista as telas (● ligada, ○ desligada, conexão HDMI/DisplayPort), os monitores com DDC/CI e as saídas de áudio (* = padrão). Use primeiro para saber os nomes.",
+         "inputSchema": obj(json!({}), &[])},
+        {"name": "telas", "description": "Liga/desliga telas, como o Win+P mas por tela. Nunca deixa zero telas ligadas. Não muda o áudio.",
+         "inputSchema": obj(json!({
+            "acao": {"type": "string", "enum": ["on", "off", "only", "all"], "description": "on = ligar, off = desligar, only = deixar só estas ligadas, all = ligar todas"},
+            "telas": {"type": "array", "items": {"type": "string"}, "description": "parte do nome de cada tela, ex: [\"samsung\"]; vazio para all"}}), &["acao"])},
+        {"name": "controles", "description": "Todos os controles de um monitor (brilho, contraste, preset, overdrive...) com valor atual, máximo e opções. Use antes de ajustar.",
+         "inputSchema": obj(json!({"monitor": s("parte do nome, ex: aw ou 25g3")}), &["monitor"])},
+        {"name": "ler", "description": "Lê um controle do monitor.",
+         "inputSchema": obj(json!({"monitor": s("parte do nome do monitor"), "controle": s("nome do controle (ex: brilho, preset) ou código VCP hex")}), &["monitor", "controle"])},
+        {"name": "ajustar", "description": "Muda um controle do monitor na hora (persiste no monitor). Cuidado: mudar 'Entrada' tira a imagem do PC daquele monitor.",
+         "inputSchema": obj(json!({"monitor": s("parte do nome do monitor"), "controle": s("nome do controle (ex: brilho, preset, overdrive) ou código VCP hex"), "valor": s("número ou nome da opção, ex: 30, FPS, Desligado")}), &["monitor", "controle", "valor"])},
+        {"name": "saturacao_gpu", "description": "Lê ou muda a saturação aplicada pela placa de vídeo NVIDIA (Vibração digital) numa tela, 0-100, 50 = padrão. Funciona até na TV, que não aceita DDC/CI. Não persiste após reiniciar o PC.",
+         "inputSchema": obj(json!({"tela": s("parte do nome da tela"), "valor": {"type": "integer", "minimum": 0, "maximum": 100, "description": "omitir para só ler"}}), &["tela"])},
+        {"name": "audio", "description": "Define a saída de áudio padrão do sistema.",
+         "inputSchema": obj(json!({"saida": s("parte do nome da saída, ex: samsung, realtek")}), &["saida"])}
+    ])
+}
+
+/// Tool call -> CLI argv.
+fn mcp_args(name: &str, a: &serde_json::Value) -> Result<Vec<String>, String> {
+    let s = |k: &str| a.get(k).map(|v| v.as_str().map_or(v.to_string(), str::to_string)).ok_or(format!("falta o argumento '{k}'"));
+    Ok(match name {
+        "listar" => vec!["list".into()],
+        "telas" => {
+            let telas: Vec<String> = a.get("telas").and_then(|t| t.as_array()).map(|t| t.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            [vec![s("acao")?], telas].concat()
+        }
+        "controles" => vec!["caps".into(), s("monitor")?],
+        "ler" => vec!["get".into(), s("monitor")?, s("controle")?],
+        "ajustar" => vec!["set".into(), s("monitor")?, s("controle")?, s("valor")?],
+        "saturacao_gpu" => [vec!["sat".into(), s("tela")?], s("valor").ok().into_iter().collect()].concat(),
+        "audio" => vec!["audio".into(), s("saida")?],
+        _ => return Err(format!("ferramenta desconhecida: {name}")),
+    })
+}
+
+fn mcp() -> Result<(), String> {
+    use serde_json::{Value, json};
+    log("mcp: iniciado");
+    for line in std::io::stdin().lines() {
+        let line = line.map_err(|e| e.to_string()).logged("mcp stdin")?;
+        let Ok(req) = serde_json::from_str::<Value>(&line).map_err(|e| format!("{e}: {line}")).logged("mcp json") else { continue };
+        let Some(id) = req.get("id").cloned() else { continue }; // notification
+        let p = &req["params"];
+        let result = match req["method"].as_str().unwrap_or_default() {
+            "initialize" => Ok(json!({
+                "protocolVersion": p["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "monctl", "version": env!("CARGO_PKG_VERSION")},
+                "instructions": "Controla os monitores e telas deste PC: liga/desliga telas, brilho/contraste/presets via DDC/CI, saturação pela GPU e saída de áudio. Use 'listar' e 'controles' antes de ajustar."
+            })),
+            "tools/list" => Ok(json!({"tools": mcp_tools()})),
+            "tools/call" => {
+                let name = p["name"].as_str().unwrap_or_default();
+                log(format!("mcp {name} {}", p["arguments"]));
+                let r = mcp_args(name, &p["arguments"]).and_then(|a| cli(&a)).logged(&format!("mcp {name}"));
+                Ok(json!({"content": [{"type": "text", "text": r.as_deref().unwrap_or_else(|e| e)}], "isError": r.is_err()}))
+            }
+            "ping" => Ok(json!({})),
+            m => Err(json!({"code": -32601, "message": format!("método desconhecido: {m}")})),
+        };
+        let msg = match result {
+            Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
+            Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
+        };
+        let mut o = std::io::stdout().lock();
+        writeln!(o, "{msg}").and_then(|_| o.flush()).map_err(|e| e.to_string()).logged("mcp stdout")?;
+    }
+    log("mcp: stdin fechado, saindo");
     Ok(())
 }
 
@@ -536,9 +675,11 @@ type MonState = Result<(Vec<Feat>, String), String>;
 struct Mon {
     name: String,
     state: Arc<Mutex<MonState>>,
-    /// Some((op, value)) = write · None = DDC "Save Current Settings"
+    /// Some((op, value)) = write · None = Salvar (DDC "Save Current Settings" + GPU value to disk)
     tx: mpsc::Sender<Option<(Op, u16)>>,
     worker: JoinHandle<()>,
+    /// the display has a DDC/CI handle (it may still not answer, like a TV)
+    hw: bool,
 }
 
 impl Mon {
@@ -547,6 +688,14 @@ impl Mon {
         match &mut *self.state.lock().unwrap() {
             Ok((fs, _)) => f(fs),
             Err(_) => R::default(),
+        }
+    }
+
+    /// Has monitor controls (DDC/CI), not just the GPU ones. While loading: whether it has a DDC handle.
+    fn has_ddc(&self) -> bool {
+        match &*self.state.lock().unwrap() {
+            Ok((fs, _)) => fs.iter().any(|f| f.op != Op::Vibrance),
+            Err(e) => self.hw && e == "carregando…",
         }
     }
 
@@ -583,14 +732,47 @@ impl Mon {
     }
 }
 
-/// One worker per monitor: loads features, then applies writes, coalescing slider drags.
-/// It's also the only thing touching that monitor, which Dell's select-then-read codes require.
-fn spawn_mon(m: sys::Monitor, ctx: egui::Context) -> Mon {
+/// Saved GPU saturation of a display (the driver forgets it on reboot, so it's re-applied on load).
+fn gpu_path(name: &str) -> PathBuf {
+    app_dir().join(format!("gpu-{name}.txt"))
+}
+
+fn gpu_feat(name: &str, gdi: &str) -> Option<Feat> {
+    let mut cur = sys::vibrance(gdi).logged(&format!("{name} saturação GPU")).ok()?;
+    let saved = std::fs::read_to_string(gpu_path(name)).ok().and_then(|t| t.trim().parse::<u16>().ok());
+    // an unsaved change from before a reload/crash stays as it is (read_pending marks it unsaved)
+    let unsaved = std::fs::read_to_string(pending_path(name)).is_ok_and(|t| t.lines().any(|l| l.starts_with("Vibrance\t")));
+    if let (Some(v), false) = (saved.filter(|&v| v != cur), unsaved) {
+        if sys::set_vibrance(gdi, v).logged(&format!("{name} reaplicar saturação GPU {v}")).is_ok() {
+            log(format!("{name}: saturação GPU {cur} → {v} (valor salvo)"));
+            cur = v;
+        }
+    }
+    Some(Feat { op: Op::Vibrance, name: "Saturação (GPU)".into(), cur, saved: cur, max: 100, values: vec![] })
+}
+
+/// One worker per active display: loads DDC/CI features (if the monitor answers) plus the GPU ones,
+/// then applies writes, coalescing slider drags. It's also the only thing touching that monitor,
+/// which Dell's select-then-read codes require.
+fn spawn_mon(m: Option<sys::Monitor>, name: String, gdi: String, ctx: egui::Context) -> Mon {
     let state = Arc::new(Mutex::new(Err("carregando…".to_string())));
     let (tx, rx) = mpsc::channel::<Option<(Op, u16)>>();
-    let (st, name) = (state.clone(), m.name.clone());
+    let (st, n, hw) = (state.clone(), name.clone(), m.is_some());
     let worker = spawn(move || {
-        *st.lock().unwrap() = load(&m).logged(&format!("{} carregar", m.name));
+        let mut s = match &m {
+            Some(m) => load(m).logged(&format!("{n} carregar")),
+            None => Err("sem DDC/CI".into()),
+        };
+        if let Some(f) = gpu_feat(&n, &gdi) {
+            match &mut s {
+                Ok((fs, _)) => fs.push(f),
+                Err(_) => s = Ok((vec![f], String::new())),
+            }
+        }
+        if let Ok((fs, _)) = &mut s {
+            read_pending(&n, fs);
+        }
+        *st.lock().unwrap() = s;
         ctx.request_repaint();
         while let Ok(first) = rx.recv() {
             let (mut last, mut save) = (BTreeMap::new(), false);
@@ -601,18 +783,27 @@ fn spawn_mon(m: sys::Monitor, ctx: egui::Context) -> Mon {
                 }
             }
             for (op, v) in last {
-                log(format!("{}: {op:?} = {v}", m.name));
-                _ = write(&m, op, v).logged(&format!("{} gravar {op:?}={v}", m.name));
+                log(format!("{n}: {op:?} = {v}"));
+                let r = match (op, &m) {
+                    (Op::Vibrance, _) => sys::set_vibrance(&gdi, v),
+                    (_, Some(m)) => write(m, op, v),
+                    (_, None) => Err("sem DDC/CI".into()),
+                };
+                _ = r.logged(&format!("{n} gravar {op:?}={v}"));
             }
+            let Ok((fs, _)) = &*st.lock().unwrap() else { continue };
             if save {
-                _ = m.save().logged(&format!("{} salvar (DDC 0x0C)", m.name));
+                if let (Some(m), true) = (&m, fs.iter().any(|f| f.op != Op::Vibrance)) {
+                    _ = m.save().logged(&format!("{n} salvar (DDC 0x0C)"));
+                }
+                if let Some(f) = fs.iter().find(|f| f.op == Op::Vibrance) {
+                    _ = std::fs::write(gpu_path(&n), f.saved.to_string()).map_err(|e| e.to_string()).logged(&format!("{n} salvar saturação GPU"));
+                }
             }
-            if let Ok((fs, _)) = &*st.lock().unwrap() {
-                write_pending(&m.name, fs);
-            }
+            write_pending(&n, fs);
         }
     });
-    Mon { name, state, tx, worker }
+    Mon { name, state, tx, worker, hw }
 }
 
 // Look ported from the Claude Design canvas "monctl UI" (https://claude.ai/artifact/Rf1HUMVeKckdNW75yiJLVQ).
@@ -697,12 +888,13 @@ fn setup_look(ctx: &egui::Context) {
     });
 }
 
-const SECTIONS: [&str; 5] = ["Imagem", "Jogo", "AlienVision", "Conforto", "Cor e entrada"];
+const SECTIONS: [&str; 6] = ["Imagem", "Jogo", "AlienVision", "Conforto", "Cor e entrada", "Placa de vídeo"];
 
 fn section(name: &str) -> &'static str {
     match name {
         "Tempo de resposta" | "Dark Stabilizer" | "Game Enhancement" | "Posição do contador" | "Smart HDR" | "Overdrive" | "Shadow Control" | "Game Color" | "Low Input Lag"
         | "Dial Point (mira)" | "Frame Counter" | "HDR" => "Jogo",
+        "Saturação (GPU)" => "Placa de vídeo",
         "AlienVision" => "AlienVision",
         n if n.ends_with("· V1") => "AlienVision",
         "Low Blue" | "Modo ECO" | "Gamma" | "DCR" | "DCB" | "Clean Vision" => "Conforto",
@@ -726,6 +918,7 @@ fn help(name: &str) -> &'static str {
         "Escala da imagem" | "Proporção" => "Como uma resolução menor é esticada.\nEx.: 1:1 mostra sem escalar (bom para 4:3 em jogo competitivo) · Tela cheia estica.",
         "Nitidez" => "Realce de bordas. Alto demais cria halos ao redor de textos.",
         "Saturação" => "Intensidade das cores. 0 = preto e branco.",
+        "Saturação (GPU)" => "Saturação aplicada pela placa de vídeo (Vibração digital da NVIDIA) no sinal que sai para esta tela.\nFunciona até na TV, que não aceita DDC/CI. 50 = padrão do driver.\nEx.: 65–80 deixa as cores mais vivas em jogos.",
         "Matiz" => "Gira o tom de todas as cores.",
         "Idioma do OSD" => "Idioma do menu na tela do monitor.",
         "Modo de imagem" => "Preset de imagem do fabricante (Jogos, Filme, Esportes...).",
@@ -908,7 +1101,17 @@ struct Gui {
 impl Gui {
     fn reload(&mut self, ctx: &egui::Context) {
         self.displays = sys::displays().logged("listar telas").unwrap_or_default();
-        self.mons = sys::monitors().into_iter().map(|m| spawn_mon(m, ctx.clone())).collect();
+        // one worker per active display, with its DDC/CI handle when there is one
+        let mut ddc = sys::monitors();
+        self.mons = self
+            .displays
+            .iter()
+            .filter(|d| d.active)
+            .map(|d| {
+                let m = ddc.iter().position(|m| m.name == d.name).map(|i| ddc.swap_remove(i));
+                spawn_mon(m, d.name.clone(), d.gdi.clone(), ctx.clone())
+            })
+            .collect();
         self.reload_audio();
         self.reload = false;
     }
@@ -932,6 +1135,11 @@ impl Gui {
         self.mons.iter().filter(move |m| m.name == name && !matches!(&*m.state.lock().unwrap(), Err(e) if e != "carregando…"))
     }
 
+    /// The display has monitor controls (DDC/CI), not only the GPU saturation.
+    fn has_ddc(&self, name: &str) -> bool {
+        self.mons.iter().any(|m| m.name == name && m.has_ddc())
+    }
+
     /// Audio endpoint that belongs to a display (TV over HDMI), matched by name.
     fn audio_of(&self, display: &str) -> Option<(String, String)> {
         let key = display.to_lowercase();
@@ -949,7 +1157,7 @@ impl Gui {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(RichText::new("monctl").size(17.0).family(bold()).color(TEXT));
-                let ddc = self.displays.iter().filter(|d| self.ddc(&d.name).next().is_some()).count();
+                let ddc = self.displays.iter().filter(|d| self.has_ddc(&d.name)).count();
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{} telas · {ddc} com DDC/CI", self.displays.len())).size(12.0).color(MUTED));
                     let st = self.status.lock().unwrap().clone();
@@ -1049,7 +1257,7 @@ impl Gui {
             // ponytail: ScrollArea only as a fallback for tiny windows; the layout is sized to fit 1080p
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 let busy = self.busy.load(Ordering::Relaxed);
-                let has_ddc = |d: &sys::Display| self.ddc(&d.name).next().is_some();
+                let has_ddc = |d: &sys::Display| self.has_ddc(&d.name);
                 // cards side by side: monitors with controls get twice the width of plain outputs (TV)
                 let units: f32 = self.displays.iter().map(|d| if has_ddc(d) { 2.0 } else { 1.0 }).sum();
                 let gap = 14.0;
@@ -1108,27 +1316,27 @@ impl Gui {
                                 ui.add_space(4.0);
                                 ui.separator();
                                 // ponytail: matched by name, two identical monitors would share a card
-                                let mut mons = self.ddc(&d.name).peekable();
-                                if mons.peek().is_none() {
+                                let mons: Vec<&Mon> = self.ddc(&d.name).collect();
+                                if !d.active {
                                     ui.add_space(8.0);
-                                    if !d.active {
-                                        ui.label(RichText::new("Tela desligada. Ligue no botão acima.").color(MUTED));
-                                    } else {
-                                        ui.label(RichText::new("Sem controle de imagem").size(15.0).family(bold()).color(SOFT));
-                                        ui.label(RichText::new("TVs normalmente não aceitam DDC/CI pelo cabo. Ligar/desligar a tela e o áudio funcionam normalmente.").color(MUTED));
-                                    }
-                                    if let Some((id, n)) = &audio {
-                                        ui.add_space(6.0);
-                                        if *id == self.audio_def {
-                                            chip(ui, "Áudio ativo nesta tela", true);
-                                        } else if ui.button("Usar o áudio desta tela").clicked() {
-                                            set_audio = Some((id.clone(), n.clone()));
-                                        }
-                                    }
+                                    ui.label(RichText::new("Tela desligada. Ligue no botão acima.").color(MUTED));
+                                } else if !self.has_ddc(&d.name) {
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new("Sem controle de imagem no monitor").size(15.0).family(bold()).color(SOFT));
+                                    let gpu = if mons.is_empty() { "" } else { " A saturação abaixo é aplicada pela placa de vídeo no sinal enviado." };
+                                    ui.label(RichText::new(format!("TVs normalmente não aceitam DDC/CI pelo cabo.{gpu}")).color(MUTED));
                                 }
                                 for m in mons {
                                     controls(ui, m);
                                     save_bar(ui, m);
+                                }
+                                if let (Some((id, n)), true) = (&audio, d.active) {
+                                    ui.add_space(6.0);
+                                    if *id == self.audio_def {
+                                        chip(ui, "Áudio ativo nesta tela", true);
+                                    } else if ui.button("Usar o áudio desta tela").clicked() {
+                                        set_audio = Some((id.clone(), n.clone()));
+                                    }
                                 }
                             });
                         });
@@ -1169,9 +1377,13 @@ fn main() {
     // --min: started by "iniciar com o sistema"
     let min = args.iter().any(|a| a == "--min");
     if !args.is_empty() && !min {
-        if let Err(e) = cli(&args).logged(&format!("cli {args:?}")) {
-            eprintln!("{e}");
-            std::process::exit(1);
+        match cli(&args).logged(&format!("cli {args:?}")) {
+            Ok(out) if out.is_empty() => {}
+            Ok(out) => println!("{}", out.trim_end()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -1237,6 +1449,24 @@ mod tests {
         assert_eq!(fresh.iter().map(|f| f.saved).collect::<Vec<_>>(), [20, 3, 2]);
         write_pending(name, &fresh.map(|x| f(x.op, x.saved, x.saved)));
         assert!(!pending_path(name).exists(), "nothing unsaved -> file removed");
+    }
+
+    /// Reads NVIDIA Digital Vibrance of every active output, writes +1 and back: `cargo test -- --ignored vib --nocapture`
+    #[test]
+    #[ignore]
+    fn vib_probe() {
+        for d in sys::displays().unwrap().iter().filter(|d| d.active) {
+            let v = sys::vibrance(&d.gdi);
+            println!("{} {} -> {v:?}", d.name, d.gdi);
+            // write +1 and back: proves SetDVCLevelEx round-trips without a visible change
+            if let Ok(v) = v {
+                let t = if v < 100 { v + 1 } else { v - 1 };
+                sys::set_vibrance(&d.gdi, t).unwrap();
+                assert_eq!(sys::vibrance(&d.gdi).unwrap(), t);
+                sys::set_vibrance(&d.gdi, v).unwrap();
+                assert_eq!(sys::vibrance(&d.gdi).unwrap(), v);
+            }
+        }
     }
 
     /// Touches the real HKCU\...\Run / ~/.config/autostart: `cargo test -- --ignored autostart`

@@ -3,6 +3,7 @@
 Controle de monitores pelo PC, sem o software do fabricante. Windows e Linux, um binário só (Rust).
 
 - **Imagem via DDC/CI**: brilho, contraste, saturação, ganhos RGB, preset de cor, entrada, volume, idioma do OSD…
+- **Saturação pela placa de vídeo** (NVIDIA "Vibração digital", por saída): aplicada no sinal enviado, então funciona até na TV, que não aceita DDC/CI. O valor salvo é reaplicado ao abrir o app, porque o driver esquece no reboot (use junto com "Iniciar com o sistema"). Windows: NVAPI; Linux: `nvidia-settings` (driver proprietário, X11).
 - **Recursos proprietários**, mapeados por engenharia reversa dos apps oficiais:
   - **Alienware (AWCC)**: preset (FPS, MOBA, RPG, SPORTS…), tempo de resposta, Dark Stabilizer, contador de FPS/timer e posição, Smart HDR, AlienVision (modo, mira, cor, zoom…).
   - **AOC (G-Menu)**: Overdrive, Shadow Control, Game Color, Low Input Lag, Dial Point (mira), Frame Counter, Low Blue, ECO, Gamma, DCR, DCB, modo de jogo.
@@ -24,13 +25,15 @@ Controle de monitores pelo PC, sem o software do fabricante. Windows e Linux, um
 Sem argumentos, abre a interface. Com argumentos, funciona como CLI (bom para atalhos):
 
 ```
-monctl list                 telas, monitores DDC/CI e saídas de áudio
-monctl on|off|only NOME..   liga/desliga telas (NOME = parte do nome, ex: samsung)
-monctl all                  liga todas as telas conectadas
-monctl caps NOME            capabilities DDC/CI + todos os controles e valores
-monctl get NOME CODIGO      ex: monctl get aw 10   |  AOC: monctl get aoc f8e151
-monctl set NOME CODIGO VAL  ex: monctl set 25g3 10 70
-monctl audio NOME           define a saída de áudio padrão
+monctl list                    telas, monitores DDC/CI e saídas de áudio
+monctl on|off|only TELA..      liga/desliga telas (TELA = parte do nome, ex: samsung)
+monctl all                     liga todas as telas conectadas
+monctl caps MONITOR            capabilities DDC/CI + todos os controles e valores
+monctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
+monctl set MONITOR CONTROLE V  V = número ou nome da opção
+monctl sat TELA [0-100]        saturação pela placa de vídeo (NVIDIA), funciona na TV
+monctl audio SAIDA             define a saída de áudio padrão
+monctl mcp                     servidor MCP (stdio) para o Claude
 ```
 
 Exemplos:
@@ -41,6 +44,30 @@ monctl on samsung           # liga a TV (o áudio não muda)
 monctl audio samsung        # manda o áudio para a TV
 monctl only aw              # só o Alienware
 monctl all
+monctl set aw brilho 30
+monctl set aw preset fps
+monctl set 25g3 overdrive médio
+monctl sat samsung 70       # TV com cores mais vivas
+```
+
+Mudanças pela CLI/MCP gravam direto no monitor; o Salvar/Desfazer é da interface.
+
+## MCP (pedir para o Claude)
+
+`monctl mcp` é um servidor [MCP](https://modelcontextprotocol.io) por stdio. Com ele você pode pedir, por exemplo: "desliga a TV", "deixa só o Alienware ligado", "baixa o brilho dos dois monitores para 20", "coloca o AOC no modo FPS", "deixa a TV mais saturada", "manda o som para a TV".
+
+Ferramentas: `listar`, `telas`, `controles`, `ler`, `ajustar`, `saturacao_gpu`, `audio`. Cada uma é um comando da CLI acima, com o mesmo log.
+
+Claude Code:
+
+```
+claude mcp add --scope user monctl -- "C:\caminho\monctl.exe" mcp
+```
+
+Claude Desktop (`%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{ "mcpServers": { "monctl": { "command": "C:\\caminho\\monctl.exe", "args": ["mcp"] } } }
 ```
 
 ## Build

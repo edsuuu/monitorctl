@@ -305,3 +305,17 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     fs::create_dir_all(f.parent().unwrap_or(&f)).map_err(|e| e.to_string())?;
     fs::write(&f, format!("[Desktop Entry]\nType=Application\nName=monctl\nExec=\"{}\" --min\nX-GNOME-Autostart-enabled=true\n", exe.display())).map_err(|e| e.to_string())
 }
+
+// ---------- NVIDIA Digital Vibrance (driver proprietário no X11): saturação aplicada pela GPU ----------
+
+/// Saturation of an output, 0..=100 (driver default = 50). DigitalVibrance is -1024..=1023.
+pub fn vibrance(id: &str) -> Result<u16, String> {
+    let t = run("nvidia-settings", &["-t", "-q", &format!("[DPY:{id}]/DigitalVibrance")])?;
+    let v: f32 = t.trim().parse().map_err(|_| format!("DigitalVibrance ilegível: {t}"))?;
+    Ok(((v + 1024.0) * 100.0 / 2047.0).round() as u16)
+}
+
+pub fn set_vibrance(id: &str, pct: u16) -> Result<(), String> {
+    let v = (pct.min(100) as f32 * 2047.0 / 100.0 - 1024.0).round() as i32;
+    run("nvidia-settings", &["-a", &format!("[DPY:{id}]/DigitalVibrance={v}")]).map(|_| ())
+}
