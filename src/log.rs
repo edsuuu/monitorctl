@@ -14,6 +14,8 @@ pub(crate) fn app_folder() -> PathBuf {
         _ = std::fs::rename(&old_folder, &folder);
         _ = std::fs::rename(folder.join("monctl.log"), folder.join("monitorctl.log"));
     }
+    // every file of the app lives here, and on a fresh machine nothing else creates it
+    _ = std::fs::create_dir_all(&folder);
     folder
 }
 
@@ -36,7 +38,6 @@ pub(crate) fn log(message: impl AsRef<str>) {
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock();
     let path = app_folder().join("monitorctl.log");
-    _ = std::fs::create_dir_all(app_folder());
     if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 1 << 20) {
         _ = std::fs::rename(&path, path.with_extension("log.old"));
     }
