@@ -1,5 +1,5 @@
 // App icon, drawn with signed distance fields so it stays crisp at every size (16 px to 256 px).
-// Shared by the window icon (main.rs) and the .exe icon resource (build.rs, via include!).
+// Shared by the window icon (gui/mod.rs) and the .exe icon resource (build.rs, via include!).
 // Design space: 256 x 256 units. A dark tile, a teal monitor and the ◐ brightness/contrast mark.
 
 /// Straight (not premultiplied) RGBA, 0.0..=1.0.
@@ -16,15 +16,15 @@ fn mix(top: Color, bottom: Color, amount: f32) -> Color {
 }
 
 /// Signed distance to a rounded rectangle (negative inside).
-fn rounded_box(x: f32, y: f32, center: (f32, f32), half_size: (f32, f32), radius: f32) -> f32 {
-    let outside_x = (x - center.0).abs() - half_size.0 + radius;
-    let outside_y = (y - center.1).abs() - half_size.1 + radius;
+fn rounded_box(point_x: f32, point_y: f32, center: (f32, f32), half_size: (f32, f32), radius: f32) -> f32 {
+    let outside_x = (point_x - center.0).abs() - half_size.0 + radius;
+    let outside_y = (point_y - center.1).abs() - half_size.1 + radius;
     let corner = outside_x.max(0.0).hypot(outside_y.max(0.0));
     corner + outside_x.max(outside_y).min(0.0) - radius
 }
 
-fn circle(x: f32, y: f32, center: (f32, f32), radius: f32) -> f32 {
-    (x - center.0).hypot(y - center.1) - radius
+fn circle(point_x: f32, point_y: f32, center: (f32, f32), radius: f32) -> f32 {
+    (point_x - center.0).hypot(point_y - center.1) - radius
 }
 
 /// The icon as RGBA bytes, `size` x `size`.
@@ -39,19 +39,19 @@ pub fn pixels(size: u32) -> Vec<u8> {
     let mut image = Vec::with_capacity((size * size * 4) as usize);
     for row in 0..size {
         for column in 0..size {
-            let x = (column as f32 + 0.5) * units_per_pixel;
-            let y = (row as f32 + 0.5) * units_per_pixel;
+            let point_x = (column as f32 + 0.5) * units_per_pixel;
+            let point_y = (row as f32 + 0.5) * units_per_pixel;
             // (distance, color) from back to front
             let mark_center = (128.0, 110.0);
             let layers: [(f32, Color); 7] = [
-                (rounded_box(x, y, (128.0, 128.0), (120.0, 120.0), 56.0), mix(tile_top, tile_bottom, y / 256.0)),
-                (rounded_box(x, y, (128.0, 110.0), (88.0, 62.0), 18.0), mix(teal_top, teal_bottom, (y - 48.0) / 124.0)),
-                (rounded_box(x, y, (128.0, 110.0), (74.0, 48.0), 8.0), mix(screen_top, screen_bottom, (y - 62.0) / 96.0)),
-                (rounded_box(x, y, (128.0, 186.0), (10.0, 16.0), 3.0), teal_bottom),
-                (rounded_box(x, y, (128.0, 204.0), (42.0, 8.0), 8.0), mix(teal_top, teal_bottom, 0.8)),
+                (rounded_box(point_x, point_y, (128.0, 128.0), (120.0, 120.0), 56.0), mix(tile_top, tile_bottom, point_y / 256.0)),
+                (rounded_box(point_x, point_y, (128.0, 110.0), (88.0, 62.0), 18.0), mix(teal_top, teal_bottom, (point_y - 48.0) / 124.0)),
+                (rounded_box(point_x, point_y, (128.0, 110.0), (74.0, 48.0), 8.0), mix(screen_top, screen_bottom, (point_y - 62.0) / 96.0)),
+                (rounded_box(point_x, point_y, (128.0, 186.0), (10.0, 16.0), 3.0), teal_bottom),
+                (rounded_box(point_x, point_y, (128.0, 204.0), (42.0, 8.0), 8.0), mix(teal_top, teal_bottom, 0.8)),
                 // ◐: a ring plus its left half filled
-                ((circle(x, y, mark_center, 26.0) + 4.0).abs() - 4.0, teal_top),
-                (circle(x, y, mark_center, 26.0).max(x - mark_center.0), teal_top),
+                ((circle(point_x, point_y, mark_center, 26.0) + 4.0).abs() - 4.0, teal_top),
+                (circle(point_x, point_y, mark_center, 26.0).max(point_x - mark_center.0), teal_top),
             ];
             // premultiplied "over" compositing, 1-pixel antialiasing from the distance
             let mut pixel = [0.0f32; 4];
