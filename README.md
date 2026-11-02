@@ -21,6 +21,7 @@ Baixe da página de [Releases](https://github.com/edsuuu/monitorctl/releases/lat
   - **Alienware (AWCC)**: preset (FPS, MOBA, RPG, SPORTS…), tempo de resposta, Dark Stabilizer, contador de FPS/timer e posição, Smart HDR, AlienVision (modo, mira, cor, zoom…).
   - **AOC (G-Menu)**: Overdrive, Shadow Control, Game Color, Low Input Lag, Dial Point (mira), Frame Counter, Low Blue, ECO, Gamma, DCR, DCB, modo de jogo.
 - **Telas tipo Win+P, mas por saída**: liga e desliga cada tela (ex.: deixar a TV no HDMI plugada e desligada), "só esta" ou "todas".
+- **Taxa de atualização (Hz)** por tela, entre as que a placa de vídeo oferece na resolução atual (Windows; Linux no X11 via `xrandr`).
 - **Áudio manual**: ligar/desligar telas nunca troca a saída de áudio; você escolhe a saída (ex.: a TV) na barra de áudio ou no card da tela.
 - **Trava de segurança**: nunca deixa zero telas ativas. Na interface, se a mudança desligar todas as telas que você estava vendo, ela é revertida em 15s, a menos que você clique em "Manter".
 - **Salvar / Desfazer**: toda mudança feita na interface vale na hora, mas só fica gravada ao clicar em **Salvar** (que também manda o comando DDC/CI `0x0C`, "Save Current Settings"). **Desfazer** volta aos valores salvos, e fechar o app sem salvar também desfaz. Se o app cair, as pendências ficam em `pendente-<monitor>.txt` e reaparecem como "não salvas" na próxima abertura.
@@ -46,6 +47,7 @@ monitorctl caps MONITOR            capabilities DDC/CI + todos os controles e va
 monitorctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
 monitorctl set MONITOR CONTROLE V  V = número ou nome da opção
 monitorctl sat TELA [0-100]        saturação pela placa de vídeo (NVIDIA), funciona na TV
+monitorctl hz TELA [HZ]            taxa de atualização: lista as opções ou troca
 monitorctl audio SAIDA             define a saída de áudio padrão
 monitorctl mcp                     servidor MCP (stdio) para o Claude
 ```
@@ -62,15 +64,16 @@ monitorctl set aw brilho 30
 monitorctl set aw preset fps
 monitorctl set 25g3 overdrive médio
 monitorctl sat samsung 70       # TV com cores mais vivas
+monitorctl hz aw 240            # Alienware a 240 Hz
 ```
 
 Mudanças pela CLI/MCP gravam direto no monitor; o Salvar/Desfazer é da interface.
 
 ## MCP (pedir para o Claude)
 
-`monitorctl mcp` é um servidor [MCP](https://modelcontextprotocol.io) por stdio; a interface não precisa estar aberta. Com ele você pode pedir, por exemplo: "desliga a TV", "deixa só o Alienware ligado", "baixa o brilho dos dois monitores para 20", "coloca o AOC no modo FPS", "deixa a TV mais saturada", "manda o som para a TV".
+`monitorctl mcp` é um servidor [MCP](https://modelcontextprotocol.io) por stdio; a interface não precisa estar aberta. Com ele você pode pedir, por exemplo: "desliga a TV", "deixa só o Alienware ligado", "baixa o brilho dos dois monitores para 20", "coloca o AOC no modo FPS", "deixa a TV mais saturada", "coloca o AOC em 144 Hz", "manda o som para a TV".
 
-Ferramentas: `listar`, `telas`, `controles`, `ler`, `ajustar`, `saturacao_gpu`, `audio`. Cada uma é um comando da CLI acima, com o mesmo log.
+Ferramentas: `listar`, `telas`, `controles`, `ler`, `ajustar`, `saturacao_gpu`, `taxa_atualizacao`, `audio`. Cada uma é um comando da CLI acima, com o mesmo log.
 
 Claude Code (caminho do instalador):
 

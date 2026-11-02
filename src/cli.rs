@@ -12,6 +12,7 @@ monitorctl caps MONITOR            capabilities DDC/CI + todos os controles e va
 monitorctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
 monitorctl set MONITOR CONTROLE V  V = número ou nome da opção, ex: set aw brilho 30 | set aw preset fps
 monitorctl sat TELA [0-100]        saturação pela placa de vídeo (NVIDIA), funciona na TV
+monitorctl hz TELA [HZ]            taxa de atualização: lista as opções ou troca, ex: hz aw 240
 monitorctl audio SAIDA             define a saída de áudio padrão
 monitorctl mcp                     servidor MCP (stdio) para o Claude controlar tudo isso
 log: %APPDATA%\\monitorctl\\monitorctl.log  (Linux: ~/.config/monitorctl/monitorctl.log)";
@@ -125,6 +126,23 @@ pub(crate) fn run(arguments: &[String]) -> Result<String, String> {
                 platform::set_vibrance(&display.gdi, value)?;
             }
             output += &format!("{} saturação (GPU) = {}", display.name, platform::vibrance(&display.gdi)?);
+        }
+        "hz" => {
+            let display = find_display(argument(1)?)?;
+            if !display.active {
+                return Err(format!("{} está desligada", display.name));
+            }
+            if let Some(hertz) = arguments.get(2) {
+                let hertz: u32 = hertz.trim_end_matches(|character: char| !character.is_ascii_digit()).parse().map_err(|_| format!("taxa '{hertz}' inválida"))?;
+                let (_, rates) = platform::refresh_rates(&display.gdi)?;
+                if !rates.contains(&hertz) {
+                    return Err(format!("{} não aceita {hertz} Hz; opções: {rates:?}", display.name));
+                }
+                log(format!("cli taxa {} = {hertz} Hz", display.name));
+                platform::set_refresh_rate(&display.gdi, hertz)?;
+            }
+            let (current, rates) = platform::refresh_rates(&display.gdi)?;
+            output += &format!("{} = {current} Hz (opções: {})", display.name, rates.iter().map(u32::to_string).collect::<Vec<_>>().join(", "));
         }
         "audio" => {
             let query = argument(1)?.to_lowercase();

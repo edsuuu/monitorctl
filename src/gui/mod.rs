@@ -9,6 +9,7 @@ use crate::log::{Logged, log};
 use crate::{logo, platform};
 use eframe::egui;
 use eframe::egui::{Color32, RichText, Stroke};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::spawn;
@@ -26,6 +27,8 @@ struct Gui {
     styled: bool,
     /// (deadline, previous outputs): set when a change turned off every output you were looking at
     revert: Arc<Mutex<Option<(Instant, Vec<String>)>>>,
+    /// display id -> (current Hz, Hz offered at the current resolution)
+    refresh_rates: HashMap<String, (u32, Vec<u32>)>,
     audio: Vec<(String, String)>,
     default_audio: String,
     volume: f32,
@@ -39,6 +42,12 @@ struct Gui {
 impl Gui {
     fn reload(&mut self, context: &egui::Context) {
         self.displays = platform::displays().logged("listar telas").unwrap_or_default();
+        self.refresh_rates = self
+            .displays
+            .iter()
+            .filter(|display| display.active)
+            .filter_map(|display| Some((display.id.clone(), platform::refresh_rates(&display.gdi).logged(&format!("taxas de {}", display.name)).ok()?)))
+            .collect();
         // one worker per active display, with its DDC/CI handle when there is one
         let mut ddc_monitors = platform::monitors();
         self.workers = self
@@ -176,7 +185,7 @@ impl Gui {
         egui::Panel::top("header")
             .frame(egui::Frame::new().fill(HEADER).inner_margin(egui::Margin::symmetric(20, 10)).stroke(Stroke::new(1.0, CARD_LINE)))
             .show(ui, |ui| self.header(ui));
-        let (mut wanted, mut set_audio) = (None, None::<(String, String)>);
+        let (mut wanted, mut set_audio, mut wanted_rate) = (None, None::<(String, String)>, None::<(String, String, u32)>);
         let active: Vec<String> = self.displays.iter().filter(|display| display.active).map(|display| display.id.clone()).collect();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BACKGROUND).inner_margin(egui::Margin::same(16))).show(ui, |ui| {
             if let Some((deadline, previous)) = self.revert.lock().unwrap().clone() {
@@ -257,6 +266,24 @@ impl Gui {
                                 }
                                 ui.add_space(4.0);
                                 ui.separator();
+                                if let Some((current, rates)) = self.refresh_rates.get(&display.id).filter(|(_, rates)| rates.len() > 1) {
+                                    ui.add_enabled_ui(!busy, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.set_min_height(30.0);
+                                            ui.label(RichText::new("Taxa de atualização").color(SOFT));
+                                            help_button(ui, "Quantas imagens por segundo a placa de vídeo manda para esta tela.
+Só aparecem as taxas que a placa oferece na resolução atual.
+Muda na hora e fica gravado no sistema, como nas configurações de vídeo.");
+                                            egui::ComboBox::from_id_salt(("hz", &display.id)).selected_text(format!("{current} Hz")).show_ui(ui, |ui| {
+                                                for rate in rates.iter().rev() {
+                                                    if ui.selectable_label(rate == current, format!("{rate} Hz")).clicked() && rate != current {
+                                                        wanted_rate = Some((display.gdi.clone(), display.name.clone(), *rate));
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    });
+                                }
                                 // ponytail: matched by name, two identical monitors would share a card
                                 let workers: Vec<&MonitorWorker> = self.ddc_workers(&display.name).collect();
                                 if !display.active {
@@ -297,6 +324,21 @@ impl Gui {
         if let Some((id, name)) = set_audio {
             self.set_audio(&id, &name);
         }
+        if let Some((gdi, name, hertz)) = wanted_rate {
+            let (status, busy, context) = (self.status.clone(), self.busy.clone(), ui.ctx().clone());
+            busy.store(true, Ordering::Relaxed);
+            *status.lock().unwrap() = "aplicando…".into();
+            self.reload = true;
+            spawn(move || {
+                let result = platform::set_refresh_rate(&gdi, hertz).logged(&format!("taxa de {name}"));
+                *status.lock().unwrap() = match result {
+                    Ok(()) => format!("{name}: {hertz} Hz"),
+                    Err(error) => format!("erro: {error}"),
+                };
+                busy.store(false, Ordering::Relaxed);
+                context.request_repaint();
+            });
+        }
         if let Some(wanted) = wanted {
             let (status, busy, revert, context) = (self.status.clone(), self.busy.clone(), self.revert.clone(), ui.ctx().clone());
             busy.store(true, Ordering::Relaxed);
@@ -326,6 +368,7 @@ pub(crate) fn run(start_minimized: bool) {
         reload: true,
         styled: false,
         revert: Default::default(),
+        refresh_rates: HashMap::new(),
         audio: vec![],
         default_audio: String::new(),
         volume: 0.0,

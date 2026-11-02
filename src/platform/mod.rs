@@ -8,7 +8,7 @@ mod windows;
 #[cfg(windows)]
 use self::windows as backend;
 
-pub(crate) use backend::{Display, Monitor, audio_outputs, autostart, crash_handler, default_audio, displays, hide_console, monitors, set_active, set_autostart, set_default_audio, set_vibrance, set_volume, vibrance, volume};
+pub(crate) use backend::{Display, Monitor, audio_outputs, autostart, crash_handler, default_audio, displays, hide_console, monitors, refresh_rates, set_active, set_refresh_rate, set_autostart, set_default_audio, set_vibrance, set_volume, vibrance, volume};
 
 #[cfg(test)]
 mod tests {

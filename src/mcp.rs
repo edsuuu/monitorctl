@@ -22,6 +22,8 @@ fn tools() -> Value {
          "inputSchema": object(json!({"monitor": string("parte do nome do monitor"), "controle": string("nome do controle (ex: brilho, preset, overdrive) ou código VCP hex"), "valor": string("número ou nome da opção, ex: 30, FPS, Desligado")}), &["monitor", "controle", "valor"])},
         {"name": "saturacao_gpu", "description": "Lê ou muda a saturação aplicada pela placa de vídeo NVIDIA (Vibração digital) numa tela, 0-100, 50 = padrão. Funciona até na TV, que não aceita DDC/CI. Não persiste após reiniciar o PC.",
          "inputSchema": object(json!({"tela": string("parte do nome da tela"), "valor": {"type": "integer", "minimum": 0, "maximum": 100, "description": "omitir para só ler"}}), &["tela"])},
+        {"name": "taxa_atualizacao", "description": "Lê ou troca a taxa de atualização (Hz) de uma tela, entre as que a placa de vídeo oferece na resolução atual. Sem 'hz', só lista a atual e as opções.",
+         "inputSchema": object(json!({"tela": string("parte do nome da tela"), "hz": {"type": "integer", "description": "omitir para só ler, ex: 240"}}), &["tela"])},
         {"name": "audio", "description": "Define a saída de áudio padrão do sistema.",
          "inputSchema": object(json!({"saida": string("parte do nome da saída, ex: samsung, realtek")}), &["saida"])}
     ])
@@ -40,6 +42,7 @@ fn cli_arguments(name: &str, arguments: &Value) -> Result<Vec<String>, String> {
         "ler" => vec!["get".into(), argument("monitor")?, argument("controle")?],
         "ajustar" => vec!["set".into(), argument("monitor")?, argument("controle")?, argument("valor")?],
         "saturacao_gpu" => [vec!["sat".into(), argument("tela")?], argument("valor").ok().into_iter().collect()].concat(),
+        "taxa_atualizacao" => [vec!["hz".into(), argument("tela")?], argument("hz").ok().into_iter().collect()].concat(),
         "audio" => vec!["audio".into(), argument("saida")?],
         _ => return Err(format!("ferramenta desconhecida: {name}")),
     })
@@ -57,7 +60,7 @@ pub(crate) fn serve() -> Result<(), String> {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "monitorctl", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Controla os monitores e telas deste PC: liga/desliga telas, brilho/contraste/presets via DDC/CI, saturação pela GPU e saída de áudio. Use 'listar' e 'controles' antes de ajustar."
+                "instructions": "Controla os monitores e telas deste PC: liga/desliga telas, brilho/contraste/presets via DDC/CI, saturação pela GPU, taxa de atualização (Hz) e saída de áudio. Use 'listar' e 'controles' antes de ajustar."
             })),
             "tools/list" => Ok(json!({"tools": tools()})),
             "tools/call" => {

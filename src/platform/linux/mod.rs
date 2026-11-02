@@ -4,12 +4,14 @@ mod audio;
 mod autostart;
 mod ddc;
 mod displays;
+mod refresh;
 mod vibrance;
 
 pub(crate) use audio::{audio_outputs, default_audio, set_default_audio, set_volume, volume};
 pub(crate) use autostart::{autostart, set_autostart};
 pub(crate) use ddc::{Monitor, monitors};
 pub(crate) use displays::{Display, displays, set_active};
+pub(crate) use refresh::{refresh_rates, set_refresh_rate};
 pub(crate) use vibrance::{set_vibrance, vibrance};
 
 fn run(command: &str, arguments: &[&str]) -> Result<String, String> {

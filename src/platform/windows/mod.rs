@@ -5,6 +5,7 @@ mod autostart;
 mod crash;
 mod ddc;
 mod displays;
+mod refresh;
 mod nvapi;
 mod vibrance;
 
@@ -13,6 +14,7 @@ pub(crate) use autostart::{autostart, set_autostart};
 pub(crate) use crash::crash_handler;
 pub(crate) use ddc::{Monitor, monitors};
 pub(crate) use displays::{Display, displays, set_active};
+pub(crate) use refresh::{refresh_rates, set_refresh_rate};
 pub(crate) use vibrance::{set_vibrance, vibrance};
 
 fn error_text(error: impl std::fmt::Display) -> String {
