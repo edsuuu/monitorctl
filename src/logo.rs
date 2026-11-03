@@ -29,7 +29,10 @@ fn circle(point_x: f32, point_y: f32, center: (f32, f32), radius: f32) -> f32 {
 
 /// The icon as RGBA bytes, `size` x `size`.
 pub fn pixels(size: u32) -> Vec<u8> {
-    let units_per_pixel = 256.0 / size as f32;
+    // ponytail: 80% of the canvas leaves the margin Windows icons have; tune if it still looks big
+    const ARTWORK_SCALE: f32 = 0.8;
+    let units_per_pixel = 256.0 / size as f32 / ARTWORK_SCALE;
+    let canvas_offset = 128.0 * (1.0 - 1.0 / ARTWORK_SCALE);
     let tile_top = color(0x232C3A);
     let tile_bottom = color(0x0E1116);
     let teal_top = color(0x6CEBDD);
@@ -39,8 +42,8 @@ pub fn pixels(size: u32) -> Vec<u8> {
     let mut image = Vec::with_capacity((size * size * 4) as usize);
     for row in 0..size {
         for column in 0..size {
-            let point_x = (column as f32 + 0.5) * units_per_pixel;
-            let point_y = (row as f32 + 0.5) * units_per_pixel;
+            let point_x = (column as f32 + 0.5) * units_per_pixel + canvas_offset;
+            let point_y = (row as f32 + 0.5) * units_per_pixel + canvas_offset;
             // (distance, color) from back to front
             let mark_center = (128.0, 110.0);
             let layers: [(f32, Color); 7] = [
