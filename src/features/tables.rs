@@ -26,8 +26,9 @@ pub(super) const MCCS: &[Definition] = &[
 
 /// AOC G-Menu 3.31 (monitorctl-rea/aoc-25g3zm.md).
 pub(super) const AOC: &[Definition] = &[
+    // game mode (0xDC) is what the OSD calls the preset; with it off, "Modo ECO" applies
+    (Operation::Vcp(0xDC), "Preset", &[(0, "Desligado"), (0x0B, "FPS"), (0x0C, "RTS"), (0x0D, "Racing"), (0x0E, "Gamer 1"), (0x0F, "Gamer 2"), (0x10, "Gamer 3")]),
     (Operation::Vcp(0x14), "Temperatura de cor", &[(1, "sRGB"), (5, "Warm"), (6, "Normal"), (8, "Cool"), (0x0B, "User"), (0x0E, "AdobeRGB")]),
-    (Operation::Vcp(0xDC), "Modo de jogo", &[(0, "Desligado"), (0x0B, "FPS"), (0x0C, "RTS"), (0x0D, "Racing"), (0x0E, "Gamer 1"), (0x0F, "Gamer 2"), (0x10, "Gamer 3")]),
     (Operation::Vcp(0x86), "Proporção", &[(1, "1:1"), (2, "Tela cheia"), (5, "Aspecto"), (0x0B, "17\" 4:3"), (0x0C, "19\" 4:3"), (0x0D, "19\" 16:10"), (0x0E, "21.5\" 16:9"), (0x0F, "22\" 16:10"), (0x10, "23\" 16:9"), (0x11, "23.6\" 16:9"), (0x12, "24\" 16:9"), (0x13, "24\" 16:10")]),
     (Operation::Aoc(0x51, 0x0010), "Overdrive", &[(0, "Desligado"), (1, "Fraco"), (2, "Médio"), (3, "Forte"), (4, "Boost")]),
     (Operation::Aoc(0x58, 0x0800), "Shadow Control", &[]),

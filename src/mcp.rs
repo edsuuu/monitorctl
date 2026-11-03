@@ -14,7 +14,9 @@ fn tools() -> Value {
          "inputSchema": object(json!({
             "acao": {"type": "string", "enum": ["on", "off", "only", "all"], "description": "on = ligar, off = desligar, only = deixar só estas ligadas, all = ligar todas"},
             "telas": {"type": "array", "items": {"type": "string"}, "description": "parte do nome de cada tela, ex: [\"samsung\"]; vazio para all"}}), &["acao"])},
-        {"name": "controles", "description": "Todos os controles de um monitor (brilho, contraste, preset, overdrive...) com valor atual, máximo e opções. Use antes de ajustar.",
+        {"name": "perfil", "description": "Perfis de telas salvos pelo usuário (ex.: 'Só TV', 'Monitores'). Sem 'nome', lista os perfis; com 'nome', liga só as telas daquele perfil. Não muda o áudio.",
+         "inputSchema": object(json!({"nome": string("nome do perfil, ex: só tv")}), &[])},
+        {"name": "controles","description": "Todos os controles de um monitor (brilho, contraste, preset, overdrive...) com valor atual, máximo e opções. Use antes de ajustar.",
          "inputSchema": object(json!({"monitor": string("parte do nome, ex: aw ou 25g3")}), &["monitor"])},
         {"name": "ler", "description": "Lê um controle do monitor.",
          "inputSchema": object(json!({"monitor": string("parte do nome do monitor"), "controle": string("nome do controle (ex: brilho, preset) ou código VCP hex")}), &["monitor", "controle"])},
@@ -38,6 +40,7 @@ fn cli_arguments(name: &str, arguments: &Value) -> Result<Vec<String>, String> {
             let displays: Vec<String> = arguments.get("telas").and_then(|list| list.as_array()).map(|list| list.iter().filter_map(|value| value.as_str().map(str::to_string)).collect()).unwrap_or_default();
             [vec![argument("acao")?], displays].concat()
         }
+        "perfil" => [vec!["perfil".into()], argument("nome").ok().into_iter().collect()].concat(),
         "controles" => vec!["caps".into(), argument("monitor")?],
         "ler" => vec!["get".into(), argument("monitor")?, argument("controle")?],
         "ajustar" => vec!["set".into(), argument("monitor")?, argument("controle")?, argument("valor")?],

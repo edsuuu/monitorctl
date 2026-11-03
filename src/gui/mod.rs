@@ -6,7 +6,7 @@ mod worker;
 use crate::displays::apply;
 use crate::features::model;
 use crate::log::{Logged, log};
-use crate::{logo, platform};
+use crate::{logo, platform, profiles};
 use eframe::egui;
 use eframe::egui::{Color32, RichText, Stroke};
 use std::collections::HashMap;
@@ -29,6 +29,9 @@ struct Gui {
     revert: Arc<Mutex<Option<(Instant, Vec<String>)>>>,
     /// display id -> (current Hz, Hz offered at the current resolution)
     refresh_rates: HashMap<String, (u32, Vec<u32>)>,
+    profiles: Vec<profiles::Profile>,
+    /// text field of the profile bar
+    new_profile_name: String,
     audio: Vec<(String, String)>,
     default_audio: String,
     volume: f32,
@@ -167,6 +170,45 @@ impl Gui {
         ui.label(RichText::new("Saída").size(12.5).color(MUTED));
     }
 
+    /// Saved display profiles: click applies (returns the outputs to turn on), right click deletes,
+    /// the field saves the outputs that are on now.
+    fn profile_bar(&mut self, ui: &mut egui::Ui, busy: bool) -> Option<Vec<String>> {
+        let mut wanted = None;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Perfis").size(12.5).color(MUTED));
+            help_button(ui, "Conjuntos de telas ligadas, como \"Só TV\" ou \"Monitores\".\nClique para aplicar · botão direito apaga · digite um nome e clique em Salvar para guardar as telas ligadas agora.\nPerfis não mudam o áudio.");
+            let mut removed = None;
+            for profile in &self.profiles {
+                let button = egui::Button::new(RichText::new(&profile.0).size(12.5)).min_size(egui::vec2(0.0, 28.0));
+                let response = ui.add_enabled(!busy, button).on_hover_text(format!("Liga só: {}\nBotão direito apaga", profile.1.join(", ")));
+                if response.clicked() {
+                    match profiles::display_ids(profile, &self.displays) {
+                        Ok(ids) => wanted = Some(ids),
+                        Err(error) => *self.status.lock().unwrap() = format!("erro: {error}"),
+                    }
+                }
+                if response.secondary_clicked() {
+                    removed = Some(profile.0.clone());
+                }
+            }
+            ui.add(egui::TextEdit::singleline(&mut self.new_profile_name).hint_text("nome do perfil").desired_width(140.0));
+            let save = egui::Button::new(RichText::new("Salvar telas atuais").size(12.5)).min_size(egui::vec2(0.0, 28.0));
+            if ui.add_enabled(!self.new_profile_name.trim().is_empty(), save).clicked() {
+                if profiles::save_current(&self.new_profile_name, &self.displays).logged("salvar perfil").is_ok() {
+                    log(format!("perfil salvo: {}", self.new_profile_name.trim()));
+                    self.new_profile_name.clear();
+                }
+                self.profiles = profiles::load();
+            }
+            if let Some(name) = removed {
+                self.profiles.retain(|profile| profile.0 != name);
+                _ = profiles::save(&self.profiles).logged("apagar perfil");
+                log(format!("perfil apagado: {name}"));
+            }
+        });
+        wanted
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui) {
         if !self.styled {
             setup_look(ui.ctx());
@@ -205,6 +247,10 @@ impl Gui {
                 ui.add_space(10.0);
                 ui.ctx().request_repaint_after(Duration::from_millis(250));
             }
+            if let Some(ids) = self.profile_bar(ui, self.busy.load(Ordering::Relaxed)) {
+                wanted = Some(ids);
+            }
+            ui.add_space(8.0);
             // ponytail: ScrollArea only as a fallback for tiny windows; the layout is sized to fit 1080p
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 let busy = self.busy.load(Ordering::Relaxed);
@@ -231,6 +277,9 @@ impl Gui {
                                                 (Some(_), true) => chip(ui, "Áudio HDMI", true),
                                                 (_, true) => chip(ui, "Ativa", true),
                                                 _ => chip(ui, "Desligada", false),
+                                            }
+                                            for preset in self.ddc_workers(&display.name).filter_map(MonitorWorker::active_preset) {
+                                                chip(ui, &preset, false);
                                             }
                                         });
                                         let vendor = model(&display.name).0;
@@ -369,6 +418,8 @@ pub(crate) fn run(start_minimized: bool) {
         styled: false,
         revert: Default::default(),
         refresh_rates: HashMap::new(),
+        profiles: profiles::load(),
+        new_profile_name: String::new(),
         audio: vec![],
         default_audio: String::new(),
         volume: 0.0,

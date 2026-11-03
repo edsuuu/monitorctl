@@ -7,6 +7,7 @@ mod log;
 mod logo;
 mod mcp;
 mod platform;
+mod profiles;
 mod unsaved;
 
 use crate::log::{Logged, app_folder, log};

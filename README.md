@@ -21,6 +21,7 @@ Baixe da página de [Releases](https://github.com/edsuuu/monitorctl/releases/lat
   - **Alienware (AWCC)**: preset (FPS, MOBA, RPG, SPORTS…), tempo de resposta, Dark Stabilizer, contador de FPS/timer e posição, Smart HDR, AlienVision (modo, mira, cor, zoom…).
   - **AOC (G-Menu)**: Overdrive, Shadow Control, Game Color, Low Input Lag, Dial Point (mira), Frame Counter, Low Blue, ECO, Gamma, DCR, DCB, modo de jogo.
 - **Telas tipo Win+P, mas por saída**: liga e desliga cada tela (ex.: deixar a TV no HDMI plugada e desligada), "só esta" ou "todas".
+- **Perfis de telas**: salve as telas ligadas agora com um nome (ex.: "Só TV", "Monitores") e aplique com um clique, pela CLI (`monitorctl perfil "só tv"`) ou pelo MCP. Ficam em `perfis.txt`, pelo nome das telas.
 - **Taxa de atualização (Hz)** por tela, entre as que a placa de vídeo oferece na resolução atual (Windows; Linux no X11 via `xrandr`).
 - **Áudio manual**: ligar/desligar telas nunca troca a saída de áudio; você escolhe a saída (ex.: a TV) na barra de áudio ou no card da tela.
 - **Trava de segurança**: nunca deixa zero telas ativas. Na interface, se a mudança desligar todas as telas que você estava vendo, ela é revertida em 15s, a menos que você clique em "Manter".

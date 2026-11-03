@@ -39,6 +39,17 @@ impl MonitorWorker {
         }
     }
 
+    /// Name of the active preset ("FPS"), shown in the card title. AOC with the preset off: its ECO mode.
+    pub(super) fn active_preset(&self) -> Option<String> {
+        self.with_features(|features| {
+            let label = |name: &str| {
+                let feature = features.iter().find(|feature| feature.name == name)?;
+                feature.values.iter().find(|value| value.0 == feature.current).map(|value| value.1.clone())
+            };
+            label("Preset").filter(|preset| preset != "Desligado").or_else(|| label("Modo ECO"))
+        })
+    }
+
     pub(super) fn dirty(&self) -> usize {
         self.with_features(|features| features.iter().filter(|feature| feature.current != feature.saved).count())
     }

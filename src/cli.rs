@@ -8,6 +8,8 @@ const USAGE: &str = "monitorctl                         abre a interface
 monitorctl list                    telas, monitores DDC/CI e saídas de áudio
 monitorctl on|off|only TELA..      liga/desliga telas (TELA = parte do nome, ex: samsung)
 monitorctl all                     liga todas as telas conectadas
+monitorctl perfil [NOME]           lista os perfis de telas ou aplica um, ex: perfil \"só tv\"
+monitorctl perfil salvar NOME      salva as telas ligadas agora como um perfil
 monitorctl caps MONITOR            capabilities DDC/CI + todos os controles e valores
 monitorctl get MONITOR CONTROLE    CONTROLE = nome (brilho, preset...) ou código: 10 | AOC f8e151
 monitorctl set MONITOR CONTROLE V  V = número ou nome da opção, ex: set aw brilho 30 | set aw preset fps
@@ -81,6 +83,23 @@ pub(crate) fn run(arguments: &[String]) -> Result<String, String> {
             }
             output += &apply(&wanted)?;
         }
+        "perfil" => match (arguments.get(1).map(String::as_str), arguments.get(2)) {
+            (None, _) => {
+                for (name, displays) in crate::profiles::load() {
+                    output += &format!("{name}: {}\n", displays.join(", "));
+                }
+            }
+            (Some("salvar"), Some(name)) => {
+                crate::profiles::save_current(name, &platform::displays()?)?;
+                log(format!("perfil salvo: {name}"));
+                output += &format!("perfil {name} salvo");
+            }
+            (Some(query), _) => {
+                let profile = crate::profiles::find(query)?;
+                log(format!("cli perfil {}", profile.0));
+                output += &apply(&crate::profiles::display_ids(&profile, &platform::displays()?)?)?;
+            }
+        },
         "caps" => {
             let monitor = find_monitor(argument(1)?)?;
             output += &format!("{}\n\n", monitor.capabilities().unwrap_or_else(|error| format!("(sem capabilities: {error})")));
